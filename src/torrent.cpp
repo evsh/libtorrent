@@ -3393,6 +3393,7 @@ namespace libtorrent
 				, r.url);
 		}
 
+/*
 		// we're listening on an interface type that was not used
 		// when talking to the tracker. If there is a matching interface
 		// type in the tracker IP list, make another tracker request
@@ -3434,7 +3435,7 @@ namespace libtorrent
 				m_ses.queue_tracker_request(req, shared_from_this());
 			}
 		}
-
+*/
 		do_connect_boost();
 
 		state_updated();

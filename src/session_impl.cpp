@@ -1294,6 +1294,8 @@ namespace aux {
 		}
 #endif
 
+//TODO: should there be an option to announce once per listen interface?
+
 		m_tracker_manager.queue_request(get_io_service(), req, c);
 	}
 
@@ -1650,28 +1652,6 @@ namespace aux {
 	}
 #endif
 
-	// TODO: 2 remove this function
-	tcp::endpoint session_impl::get_ipv6_interface() const
-	{
-		for (std::list<listen_socket_t>::const_iterator i = m_listen_sockets.begin()
-			, end(m_listen_sockets.end()); i != end; ++i)
-		{
-			if (i->local_endpoint.address().is_v6()) return i->local_endpoint;
-		}
-		return tcp::endpoint();
-	}
-
-	// TODO: 2 remove this function
-	tcp::endpoint session_impl::get_ipv4_interface() const
-	{
-		for (std::list<listen_socket_t>::const_iterator i = m_listen_sockets.begin()
-			, end(m_listen_sockets.end()); i != end; ++i)
-		{
-			if (i->local_endpoint.address().is_v4()) return i->local_endpoint;
-		}
-		return tcp::endpoint();
-	}
-
 	enum { listen_no_system_port = 0x02 };
 
 	listen_socket_t session_impl::setup_listener(std::string const& device
@@ -1987,6 +1967,7 @@ namespace aux {
 		// until the UDP sockets fully honor the listen_interfaces setting, just
 		// create the two sockets based on the first matching (ssl vs. non-ssl)
 		// TCP socket
+/*
 #ifdef TORRENT_USE_OPENSSL
 		bool created_ssl_udp_socket = false;
 #endif
@@ -2119,7 +2100,8 @@ namespace aux {
 			tcp::endpoint bind_ep = i->sock->local_endpoint(error);
 			if (error) continue;
 
-			m_alerts.emplace_alert<listen_succeeded_alert>(bind_ep, socket_type);
+			m_alerts.emplace_alert<listen_succeeded_alert>(
+				bind_ep , socket_type);
 		}
 
 #ifdef TORRENT_USE_OPENSSL
@@ -2155,6 +2137,7 @@ namespace aux {
 			if (m_alerts.should_post<udp_error_alert>())
 				m_alerts.emplace_alert<udp_error_alert>(udp::endpoint(), ec);
 		}
+*/
 
 		// initiate accepting on the listen sockets
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
@@ -6677,6 +6660,7 @@ namespace aux {
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
 			i->tcp_port_mapping[0] = -1;
+			// TODO: 4 clear UDP mapping here too
 		}
 
 		m_udp_mapping[0] = -1;
@@ -6695,6 +6679,7 @@ namespace aux {
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
 			i->tcp_port_mapping[1] = -1;
+			// TODO: 4 clear UDP mapping here too
 		}
 		m_udp_mapping[1] = -1;
 #ifdef TORRENT_USE_OPENSSL
