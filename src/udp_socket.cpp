@@ -58,21 +58,14 @@ using namespace libtorrent;
 
 udp_socket::udp_socket(io_service& ios)
 	: m_observers_locked(false)
-	, m_ipv4_sock(ios)
+	, m_socket(ios)
 	, m_timer(ios)
 	, m_buf_size(0)
 	, m_new_buf_size(0)
 	, m_buf(0)
-#if TORRENT_USE_IPV6
-	, m_ipv6_sock(ios)
-#endif
 	, m_bind_port(0)
-	, m_v4_outstanding(0)
-	, m_restart_v4(0)
-#if TORRENT_USE_IPV6
-	, m_v6_outstanding(0)
-	, m_restart_v6(false)
-#endif
+	, m_outstanding_op(0)
+	, m_restart_read(0)
 	, m_socks5_sock(ios)
 	, m_resolver(ios)
 	, m_queue_packets(false)
@@ -80,10 +73,7 @@ udp_socket::udp_socket(io_service& ios)
 	, m_force_proxy(false)
 	, m_abort(true)
 	, m_outstanding_ops(0)
-#if TORRENT_USE_IPV6
-	, m_v6_write_subscribed(false)
-#endif
-	, m_v4_write_subscribed(false)
+	, m_write_subscribed(false)
 {
 #if TORRENT_USE_ASSERTS
 	m_magic = 0x1337;
@@ -103,10 +93,7 @@ udp_socket::udp_socket(io_service& ios)
 udp_socket::~udp_socket()
 {
 	free(m_buf);
-#if TORRENT_USE_IPV6
-	TORRENT_ASSERT_VAL(m_v6_outstanding == 0, m_v6_outstanding);
-#endif
-	TORRENT_ASSERT_VAL(m_v4_outstanding == 0, m_v4_outstanding);
+	TORRENT_ASSERT_VAL(m_outstanding_op == 0, m_outstanding_op);
 	TORRENT_ASSERT(m_magic == 0x1337);
 	TORRENT_ASSERT(m_observers_locked == false);
 #if TORRENT_USE_ASSERTS
@@ -214,55 +201,29 @@ void udp_socket::send(udp::endpoint const& ep, char const* p, int len
 
 	if (m_force_proxy) return;
 
-#if TORRENT_USE_IPV6
-	if (ep.address().is_v6() && m_ipv6_sock.is_open())
-		m_ipv6_sock.send_to(boost::asio::buffer(p, len), ep, 0, ec);
-	else
-#endif
-		m_ipv4_sock.send_to(boost::asio::buffer(p, len), ep, 0, ec);
+	m_socket.send_to(boost::asio::buffer(p, len), ep, 0, ec);
 
 	if (ec == error::would_block || ec == error::try_again)
 	{
-#if TORRENT_USE_IPV6
-		if (ep.address().is_v6() && m_ipv6_sock.is_open())
+		if (!m_write_subscribed)
 		{
-			if (!m_v6_write_subscribed)
-			{
-				m_ipv6_sock.async_send(null_buffers()
-					, boost::bind(&udp_socket::on_writable, this, _1, &m_ipv6_sock));
-				m_v6_write_subscribed = true;
-			}
-		}
-		else
-#endif
-		{
-			if (!m_v4_write_subscribed)
-			{
-				m_ipv4_sock.async_send(null_buffers()
-					, boost::bind(&udp_socket::on_writable, this, _1, &m_ipv4_sock));
-				m_v4_write_subscribed = true;
-			}
+			m_socket.async_send(null_buffers()
+				, boost::bind(&udp_socket::on_writable, this, _1, &m_socket));
+			m_write_subscribed = true;
 		}
 	}
 }
 
 void udp_socket::on_writable(error_code const& ec, udp::socket* s)
 {
-#if TORRENT_USE_IPV6
-	if (s == &m_ipv6_sock)
-		m_v6_write_subscribed = false;
-	else
-#else
-		TORRENT_UNUSED(s);
-#endif
-		m_v4_write_subscribed = false;
-
+	m_write_subscribed = false;
 	if (ec == boost::asio::error::operation_aborted) return;
-
 	call_writable_handler();
 }
 
 // called whenever the socket is readable
+//#error don't pass the socket pointer here
+
 void udp_socket::on_read(error_code const& ec, udp::socket* s)
 {
 #if defined TORRENT_ASIO_DEBUGGING
@@ -272,44 +233,17 @@ void udp_socket::on_read(error_code const& ec, udp::socket* s)
 	TORRENT_ASSERT(m_magic == 0x1337);
 	TORRENT_ASSERT(is_single_thread());
 
-#if TORRENT_USE_IPV6
-	if (s == &m_ipv6_sock)
-	{
-		TORRENT_ASSERT(m_v6_outstanding > 0);
-		--m_v6_outstanding;
-	}
-	else
-#else
-		TORRENT_UNUSED(s);
-#endif
-	{
-		TORRENT_ASSERT(m_v4_outstanding > 0);
-		--m_v4_outstanding;
-	}
+	TORRENT_ASSERT(m_outstanding_op > 0);
+	--m_outstanding_op;
+
+	if (m_abort) return;
 
 	if (ec == boost::asio::error::operation_aborted)
 	{
-#if TORRENT_USE_IPV6
-		if (s == &m_ipv6_sock)
-		{
-			if (m_restart_v6) {
-				--m_restart_v6;
-				setup_read(s);
-			}
+		if (m_restart_read) {
+			--m_restart_read;
+			setup_read(s);
 		}
-		else
-#endif
-		{
-			if (m_restart_v4) {
-				--m_restart_v4;
-				setup_read(s);
-			}
-		}
-		return;
-	}
-	if (m_abort)
-	{
-		close_impl();
 		return;
 	}
 
@@ -530,28 +464,13 @@ void udp_socket::setup_read(udp::socket* s)
 		return;
 	}
 
-#if TORRENT_USE_IPV6
-	if (s == &m_ipv6_sock)
+	if (m_outstanding_op)
 	{
-		if (m_v6_outstanding)
-		{
-			++m_restart_v6;
-			m_ipv6_sock.cancel();
-			return;
-		}
-		++m_v6_outstanding;
+		++m_restart_read;
+		m_socket.cancel();
+		return;
 	}
-	else
-#endif
-	{
-		if (m_v4_outstanding)
-		{
-			++m_restart_v4;
-			m_ipv4_sock.cancel();
-			return;
-		}
-		++m_v4_outstanding;
-	}
+	++m_outstanding_op;
 
 #if defined TORRENT_ASIO_DEBUGGING
 	add_outstanding_async("udp_socket::on_read");
@@ -560,18 +479,8 @@ void udp_socket::setup_read(udp::socket* s)
 	udp::endpoint ep;
 	TORRENT_TRY
 	{
-#if TORRENT_USE_IPV6
-		if (s == &m_ipv6_sock)
-		{
-			s->async_receive_from(null_buffers()
-				, ep, make_read_handler6(boost::bind(&udp_socket::on_read, this, _1, s)));
-		}
-		else
-#endif
-		{
-			s->async_receive_from(null_buffers()
-				, ep, make_read_handler4(boost::bind(&udp_socket::on_read, this, _1, s)));
-		}
+		s->async_receive_from(null_buffers()
+			, ep, make_read_handler(boost::bind(&udp_socket::on_read, this, _1, s)));
 	}
 	TORRENT_CATCH(boost::system::system_error& e)
 	{
@@ -602,14 +511,7 @@ void udp_socket::wrap(udp::endpoint const& ep, char const* p, int len, error_cod
 	iovec[0] = boost::asio::const_buffer(header, h - header);
 	iovec[1] = boost::asio::const_buffer(p, len);
 
-#if TORRENT_USE_IPV6
-	if (m_udp_proxy_addr.address().is_v4() && m_ipv4_sock.is_open())
-#endif
-		m_ipv4_sock.send_to(iovec, m_udp_proxy_addr, 0, ec);
-#if TORRENT_USE_IPV6
-	else
-		m_ipv6_sock.send_to(iovec, m_udp_proxy_addr, 0, ec);
-#endif
+	m_socket.send_to(iovec, m_udp_proxy_addr, 0, ec);
 }
 
 void udp_socket::wrap(char const* hostname, int port, char const* p, int len, error_code& ec)
@@ -633,12 +535,7 @@ void udp_socket::wrap(char const* hostname, int port, char const* p, int len, er
 	iovec[0] = boost::asio::const_buffer(header, h - header);
 	iovec[1] = boost::asio::const_buffer(p, len);
 
-#if TORRENT_USE_IPV6
-	if (m_udp_proxy_addr.address().is_v6() && m_ipv6_sock.is_open())
-		m_ipv6_sock.send_to(iovec, m_udp_proxy_addr, 0, ec);
-	else
-#endif
-		m_ipv4_sock.send_to(iovec, m_udp_proxy_addr, 0, ec);
+	m_socket.send_to(iovec, m_udp_proxy_addr, 0, ec);
 }
 
 // unwrap the UDP packet from the SOCKS5 header
@@ -694,12 +591,8 @@ void udp_socket::close()
 	TORRENT_ASSERT(m_magic == 0x1337);
 
 	error_code ec;
-	m_ipv4_sock.close(ec);
+	m_socket.close(ec);
 	TORRENT_ASSERT_VAL(!ec || ec == error::bad_descriptor, ec);
-#if TORRENT_USE_IPV6
-	m_ipv6_sock.close(ec);
-	TORRENT_ASSERT_VAL(!ec || ec == error::bad_descriptor, ec);
-#endif
 	m_socks5_sock.close(ec);
 	TORRENT_ASSERT_VAL(!ec || ec == error::bad_descriptor, ec);
 	m_resolver.cancel();
@@ -755,21 +648,13 @@ void udp_socket::set_buf_size(int s)
 	// don't shrink the size of the receive buffer
 	error_code ec;
 	boost::asio::socket_base::receive_buffer_size recv_size;
-	m_ipv4_sock.get_option(recv_size, ec);
+	m_socket.get_option(recv_size, ec);
 	if (!ec) size = (std::max)(recv_size.value(), size);
-#if TORRENT_USE_IPV6
-	m_ipv6_sock.get_option(recv_size, ec);
-	if (!ec) size = (std::max)(recv_size.value(), size);
-#endif
 
 	error_code ignore_errors;
 	// set the internal buffer sizes as well
-	m_ipv4_sock.set_option(boost::asio::socket_base::receive_buffer_size(size)
+	m_socket.set_option(boost::asio::socket_base::receive_buffer_size(size)
 		, ignore_errors);
-#if TORRENT_USE_IPV6
-	m_ipv6_sock.set_option(boost::asio::socket_base::receive_buffer_size(size)
-		, ignore_errors);
-#endif
 }
 
 void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
@@ -779,60 +664,52 @@ void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
 
 	m_abort = false;
 
-	if (m_ipv4_sock.is_open()) m_ipv4_sock.close(ec);
-#if TORRENT_USE_IPV6
-	if (m_ipv6_sock.is_open()) m_ipv6_sock.close(ec);
-#endif
+	if (m_socket.is_open()) m_socket.close(ec);
 	ec.clear();
 
 	if (ep.address().is_v4())
 	{
-		m_ipv4_sock.open(udp::v4(), ec);
+		m_socket.open(udp::v4(), ec);
 		if (ec) return;
 
 		// this is best-effort. ignore errors
 		error_code err;
 #ifdef TORRENT_WINDOWS
-		m_ipv4_sock.set_option(exclusive_address_use(true), err);
+		m_socket.set_option(exclusive_address_use(true), err);
 #endif
-		m_ipv4_sock.set_option(boost::asio::socket_base::reuse_address(true), err);
+		m_socket.set_option(boost::asio::socket_base::reuse_address(true), err);
 
-		m_ipv4_sock.bind(ep, ec);
+		m_socket.bind(ep, ec);
 		if (ec) return;
 		udp::socket::non_blocking_io ioc(true);
-		m_ipv4_sock.io_control(ioc, ec);
+		m_socket.io_control(ioc, ec);
 		if (ec) return;
-		setup_read(&m_ipv4_sock);
+		setup_read(&m_socket);
 	}
 
 #if TORRENT_USE_IPV6
-	// TODO: 2 the udp_socket should really just be a single socket, and the
-	// session should support having more than one, just like with TCP sockets
-	// for now, just make bind failures non-fatal
-	if (supports_ipv6() && (ep.address().is_v6() || is_any(ep.address())))
+	if (supports_ipv6() && ep.address().is_v6())
 	{
-		udp::endpoint ep6 = ep;
-		if (is_any(ep.address())) ep6.address(address_v6::any());
-		m_ipv6_sock.open(udp::v6(), ec);
+		m_socket.open(udp::v6(), ec);
 		if (ec) return;
 
 		// this is best-effort. ignore errors
 		error_code err;
 #ifdef TORRENT_WINDOWS
-		m_ipv6_sock.set_option(exclusive_address_use(true), err);
+		m_socket.set_option(exclusive_address_use(true), err);
 #endif
-		m_ipv6_sock.set_option(boost::asio::socket_base::reuse_address(true), err);
-		m_ipv6_sock.set_option(boost::asio::ip::v6_only(true), err);
+		m_socket.set_option(boost::asio::socket_base::reuse_address(true), err);
+		m_socket.set_option(boost::asio::ip::v6_only(true), err);
 
-		m_ipv6_sock.bind(ep6, ec);
+		m_socket.bind(ep, ec);
 		if (ec != error_code(boost::system::errc::address_not_available
 			, boost::system::generic_category()))
 		{
 			if (ec) return;
 			udp::socket::non_blocking_io ioc(true);
-			m_ipv6_sock.io_control(ioc, ec);
+			m_socket.io_control(ioc, ec);
 			if (ec) return;
-			setup_read(&m_ipv6_sock);
+			setup_read(&m_socket);
 		}
 		else
 		{
@@ -888,10 +765,7 @@ void udp_socket::close_impl()
 	if (m_outstanding_ops == 0)
 	{
 		error_code ec;
-		m_ipv4_sock.close(ec);
-#if TORRENT_USE_IPV6
-		m_ipv6_sock.close(ec);
-#endif
+		m_socket.close(ec);
 		m_socks5_sock.close(ec);
 	}
 }

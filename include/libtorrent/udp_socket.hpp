@@ -79,7 +79,7 @@ namespace libtorrent
 		};
 
 		bool is_open() const { return m_abort == false; }
-		io_service& get_io_service() { return m_ipv4_sock.get_io_service(); }
+		io_service& get_io_service() { return m_socket.get_io_service(); }
 
 		void subscribe(udp_socket_observer* o);
 		void unsubscribe(udp_socket_observer* o);
@@ -101,7 +101,7 @@ namespace libtorrent
 		bool is_closed() const { return m_abort; }
 		tcp::endpoint local_endpoint(error_code& ec) const
 		{
-			udp::endpoint ep = m_ipv4_sock.local_endpoint(ec);
+			udp::endpoint ep = m_socket.local_endpoint(ec);
 			return tcp::endpoint(ep.address(), ep.port());
 		}
 
@@ -113,34 +113,19 @@ namespace libtorrent
 		template <class SocketOption>
 		void get_option(SocketOption const& opt, error_code& ec)
 		{
-#if TORRENT_USE_IPV6
-			if (opt.level(udp::v6()) == IPPROTO_IPV6)
-				m_ipv6_sock.get_option(opt, ec);
-			else
-#endif
-				m_ipv4_sock.get_option(opt, ec);
+				m_socket.get_option(opt, ec);
 		}
 
 		template <class SocketOption>
 		void set_option(SocketOption const& opt, error_code& ec)
 		{
-			if (opt.level(udp::v4()) != IPPROTO_IPV6)
-				m_ipv4_sock.set_option(opt, ec);
-#if TORRENT_USE_IPV6
-			if (opt.level(udp::v6()) != IPPROTO_IP)
-				m_ipv6_sock.set_option(opt, ec);
-#endif
+			m_socket.set_option(opt, ec);
 		}
 
 		template <class SocketOption>
 		void get_option(SocketOption& opt, error_code& ec)
 		{
-#if TORRENT_USE_IPV6
-			if (opt.level(udp::v6()) == IPPROTO_IPV6)
-				m_ipv6_sock.get_option(opt, ec);
-			else
-#endif
-				m_ipv4_sock.get_option(opt, ec);
+			m_socket.get_option(opt, ec);
 		}
 
 		udp::endpoint proxy_addr() const { return m_proxy_addr; }
@@ -162,14 +147,9 @@ namespace libtorrent
 
 		// number of outstanding UDP socket operations
 		// using the UDP socket buffer
+//TODO: 4 can this be removed?
 		int num_outstanding() const
-		{
-			return m_v4_outstanding
-#if TORRENT_USE_IPV6
-				+ m_v6_outstanding
-#endif
-				;
-		}
+		{ return m_outstanding_op; }
 
 		// non-copyable
 		udp_socket(udp_socket const&);
@@ -183,23 +163,12 @@ namespace libtorrent
 
 		template <class Handler>
 		aux::allocating_handler<Handler, TORRENT_READ_HANDLER_MAX_SIZE>
-			make_read_handler4(Handler const& handler)
+			make_read_handler(Handler const& handler)
 		{
 			return aux::allocating_handler<Handler, TORRENT_READ_HANDLER_MAX_SIZE>(
-				handler, m_v4_read_handler_storage
+				handler, m_read_handler_storage
 			);
 		}
-
-#if TORRENT_USE_IPV6
-		template <class Handler>
-		aux::allocating_handler<Handler, TORRENT_READ_HANDLER_MAX_SIZE>
-			make_read_handler6(Handler const& handler)
-		{
-			return aux::allocating_handler<Handler, TORRENT_READ_HANDLER_MAX_SIZE>(
-				handler, m_v6_read_handler_storage
-			);
-		}
-#endif
 
 		// this is true while iterating over the observers
 		// vector, invoking observer hooks. We may not
@@ -240,8 +209,8 @@ namespace libtorrent
 		void wrap(char const* hostname, int port, char const* p, int len, error_code& ec);
 		void unwrap(error_code const& e, char const* buf, int size);
 
-		udp::socket m_ipv4_sock;
-		aux::handler_storage<TORRENT_READ_HANDLER_MAX_SIZE> m_v4_read_handler_storage;
+		udp::socket m_socket;
+		aux::handler_storage<TORRENT_READ_HANDLER_MAX_SIZE> m_read_handler_storage;
 		deadline_timer m_timer;
 		int m_buf_size;
 
@@ -253,18 +222,19 @@ namespace libtorrent
 		int m_new_buf_size;
 		char* m_buf;
 
-#if TORRENT_USE_IPV6
-		udp::socket m_ipv6_sock;
-		aux::handler_storage<TORRENT_READ_HANDLER_MAX_SIZE> m_v6_read_handler_storage;
-#endif
-
 		boost::uint16_t m_bind_port;
-		boost::uint8_t m_v4_outstanding;
-		boost::uint8_t m_restart_v4;
-#if TORRENT_USE_IPV6
-		boost::uint8_t m_v6_outstanding;
-		boost::uint8_t m_restart_v6;
-#endif
+
+//#error this could be a single bit, since we only have a single read-handler slot anyway
+		boost::uint8_t m_outstanding_op;
+
+		// if this is > 0, it means that the next time the read handler is
+		// invoked, it's likely to have an error (llike, operation_aborted) and it
+		// should restart the async_read operation (and decrement this counter).
+		// It's used when we close and re-open/re-bind the socket. The currently
+		// outstanding operation is cancelled and once it's called, it should be
+		// re-started on the new socket
+		// TOOD: Could we do this always, as long as m_abort is false?
+		boost::uint8_t m_restart_read;
 
 		tcp::socket m_socks5_sock;
 		aux::proxy_settings m_proxy_settings;
@@ -293,12 +263,13 @@ namespace libtorrent
 
 		// counts the number of outstanding async
 		// operations hanging on this socket
+//#error is this different from m_outstanding_op?
 		int m_outstanding_ops;
 
-#if TORRENT_USE_IPV6
-		bool m_v6_write_subscribed:1;
-#endif
-		bool m_v4_write_subscribed:1;
+		// this is true when we have an outstanding async_write operation to the
+		// socket. This happens when the kernel send buffer for the socket is
+		// full.
+		bool m_write_subscribed:1;
 
 #if TORRENT_USE_ASSERTS
 		bool m_started;

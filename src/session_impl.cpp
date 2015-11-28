@@ -415,6 +415,8 @@ namespace aux {
 #endif
 		, m_external_udp_port(0)
 		, m_udp_socket(m_io_service)
+		// TODO: 4 introduce an adapter layer between the udp socket(s) and the
+		// utp socket manager
 		, m_utp_socket_manager(m_settings, m_udp_socket, m_stats_counters, NULL
 			, boost::bind(&session_impl::incoming_connection, this, _1))
 #ifdef TORRENT_USE_OPENSSL
