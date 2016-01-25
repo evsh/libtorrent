@@ -145,11 +145,7 @@ namespace libtorrent
 			int flags;
 		};
 
-		// number of outstanding UDP socket operations
-		// using the UDP socket buffer
-//TODO: 4 can this be removed?
-		int num_outstanding() const
-		{ return m_outstanding_op; }
+	private:
 
 		// non-copyable
 		udp_socket(udp_socket const&);

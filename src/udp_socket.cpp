@@ -600,7 +600,7 @@ void udp_socket::close()
 	m_abort = true;
 
 #if TORRENT_USE_ASSERTS
-	m_outstanding_when_aborted = num_outstanding();
+	m_outstanding_when_aborted = m_outstanding_op;
 #endif
 }
 
@@ -671,52 +671,36 @@ void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
 	{
 		m_socket.open(udp::v4(), ec);
 		if (ec) return;
-
-		// this is best-effort. ignore errors
-		error_code err;
-#ifdef TORRENT_WINDOWS
-		m_socket.set_option(exclusive_address_use(true), err);
-#endif
-		m_socket.set_option(boost::asio::socket_base::reuse_address(true), err);
-
-		m_socket.bind(ep, ec);
-		if (ec) return;
-		udp::socket::non_blocking_io ioc(true);
-		m_socket.io_control(ioc, ec);
-		if (ec) return;
-		setup_read(&m_socket);
 	}
-
 #if TORRENT_USE_IPV6
-	if (supports_ipv6() && ep.address().is_v6())
+	else if (ep.address().is_v6())
 	{
 		m_socket.open(udp::v6(), ec);
 		if (ec) return;
-
-		// this is best-effort. ignore errors
 		error_code err;
-#ifdef TORRENT_WINDOWS
-		m_socket.set_option(exclusive_address_use(true), err);
-#endif
-		m_socket.set_option(boost::asio::socket_base::reuse_address(true), err);
 		m_socket.set_option(boost::asio::ip::v6_only(true), err);
 
-		m_socket.bind(ep, ec);
-		if (ec != error_code(boost::system::errc::address_not_available
-			, boost::system::generic_category()))
-		{
-			if (ec) return;
-			udp::socket::non_blocking_io ioc(true);
-			m_socket.io_control(ioc, ec);
-			if (ec) return;
-			setup_read(&m_socket);
-		}
-		else
-		{
-			ec.clear();
-		}
+#ifdef TORRENT_WINDOWS
+		// enable Teredo on windows
+		m_socket->set_option(v6_protection_level(PROTECTION_LEVEL_UNRESTRICTED), err);
+#endif // TORRENT_WINDOWS
 	}
 #endif
+
+	// this is best-effort. ignore errors
+	error_code err;
+#ifdef TORRENT_WINDOWS
+	m_socket.set_option(exclusive_address_use(true), err);
+#endif
+	m_socket.set_option(boost::asio::socket_base::reuse_address(true), err);
+
+	m_socket.bind(ep, ec);
+	if (ec) return;
+	udp::socket::non_blocking_io ioc(true);
+	m_socket.io_control(ioc, ec);
+	if (ec) return;
+	setup_read(&m_socket);
+
 #if TORRENT_USE_ASSERTS
 	m_started = true;
 #endif

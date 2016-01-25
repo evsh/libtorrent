@@ -1046,6 +1046,10 @@ namespace aux {
 		{
 			i->sock->close(ec);
 			TORRENT_ASSERT(!ec);
+
+			// TODO: 3 closing the udp sockets here means that
+			// the uTP connections cannot be closed gracefully
+			i->udp_sock->close();
 		}
 		m_listen_sockets.clear();
 		if (m_socks_listen_socket && m_socks_listen_socket->is_open())
@@ -1110,12 +1114,6 @@ namespace aux {
 	{
 		m_download_rate.close();
 		m_upload_rate.close();
-
-		m_udp_socket.close();
-		m_external_udp_port = 0;
-#ifdef TORRENT_USE_OPENSSL
-		m_ssl_udp_socket.close();
-#endif
 
 		// it's OK to detach the threads here. The disk_io_thread
 		// has an internal counter and won't release the network
@@ -1829,6 +1827,7 @@ namespace aux {
 			return ret;
 		}
 		ret.tcp_external_port = ret.local_endpoint.port();
+		TORRENT_ASSERT(ret.tcp_external_port == port || port == 0);
 
 		ret.sock->listen(m_settings.get_int(settings_pack::listen_queue_size), ec);
 		last_op = listen_failed_alert::listen;
@@ -1847,10 +1846,42 @@ namespace aux {
 			return ret;
 		}
 
+		ret.udp_sock.reset(new udp_socket(m_io_service));
+		bind_ip = bind_to_device(m_io_service, *ret.udp_sock, ipv4
+			, device.c_str(), port, ec);
+		last_op = listen_failed_alert::bind;
+		if (ec)
+		{
 #ifndef TORRENT_DISABLE_LOGGING
-		session_log(" listening on: %s TCP port: %d"
-			, print_endpoint(bind_ep).c_str()
-			, ret.tcp_external_port);
+			session_log("failed to open UDP socket: %s: %s"
+				, device.c_str(), ec.message().c_str());
+#endif
+
+			listen_failed_alert::socket_type_t const sock_type
+				= (flags & open_ssl_socket)
+				? listen_failed_alert::utp_ssl
+				: listen_failed_alert::udp;
+
+			if (m_alerts.should_post<listen_failed_alert>())
+				m_alerts.emplace_alert<listen_failed_alert>(device
+					, last_op, ec, sock_type);
+
+			return ret;
+		}
+		ret.udp_external_port = ret.udp_sock->local_port();
+
+		error_code err;
+		set_socket_buffer_size(*ret.udp_sock, m_settings, err);
+		if (err)
+		{
+			if (m_alerts.should_post<udp_error_alert>())
+				m_alerts.emplace_alert<udp_error_alert>(udp::endpoint(), ec);
+		}
+
+#ifndef TORRENT_DISABLE_LOGGING
+		session_log(" listening on: %s TCP port: %d UDP port: %d"
+			, print_endpoint(tcp::endpoint(bind_ip, port)).c_str()
+			, ret.tcp_external_port, ret.udp_external_port);
 #endif
 		return ret;
 	}
@@ -1914,6 +1945,7 @@ namespace aux {
 				// this is the case where device names a network device. We need to
 				// enumerate all IPs associated with this device
 
+				// TODO: 3 only run this once, not every turn through the loop
 				std::vector<ip_interface> ifs = enum_net_interfaces(m_io_service, ec);
 				if (ec)
 				{
@@ -1957,168 +1989,38 @@ namespace aux {
 			return;
 		}
 
-		// TODO: 3 this loop should be entirely merged with the one above and the
-		// udp sockets should be opened in parallel with the TCP ones, being held
-		// by listen_socket_t.
-		// until the UDP sockets fully honor the listen_interfaces setting, just
-		// create the two sockets based on the first matching (ssl vs. non-ssl)
-		// TCP socket
-/*
-#ifdef TORRENT_USE_OPENSSL
-		bool created_ssl_udp_socket = false;
-#endif
-		bool created_udp_socket = false;
-		for (std::list<listen_socket_t>::const_iterator i = m_listen_sockets.begin()
-			, end(m_listen_sockets.end()); i != end; ++i)
+		// now, send out listen_succeeded_alert for the listen sockets we are
+		// listening on
+		if (m_alerts.should_post<listen_succeeded_alert>())
 		{
-			listen_socket_t const& s = *i;
-
-#ifdef TORRENT_USE_OPENSSL
-			if (!created_ssl_udp_socket && s.ssl)
+			for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+				, end(m_listen_sockets.end()); i != end; ++i)
 			{
-				int retries = m_settings.get_int(settings_pack::max_retry_port_bind);
-				udp::endpoint bind_ep(s.local_endpoint.address(), s.local_endpoint.port());
-				do
+				error_code err;
+				tcp::endpoint bind_ep = i->sock->local_endpoint(err);
+				if (!err)
 				{
-					ec.clear();
-					m_ssl_udp_socket.bind(bind_ep, ec);
-					if (ec)
-					{
-#ifndef TORRENT_DISABLE_LOGGING
-						session_log("SSL: cannot bind to UDP interface \"%s\": %s"
-							, print_endpoint(bind_ep).c_str(), ec.message().c_str());
-#endif
-						if (m_alerts.should_post<listen_failed_alert>())
-						{
-							error_code err;
-							m_alerts.emplace_alert<listen_failed_alert>(bind_ep.address().to_string(err)
-								, tcp::endpoint(bind_ep.address(), bind_ep.port())
-								, listen_failed_alert::bind, ec, listen_failed_alert::utp_ssl);
-						}
-						--retries;
-						bind_ep.port(bind_ep.port() + 1);
-					}
-					else
-					{
-						created_ssl_udp_socket = true;
-						maybe_update_udp_mapping(0, true, bind_ep.port(), bind_ep.port());
-						maybe_update_udp_mapping(1, true, bind_ep.port(), bind_ep.port());
-					}
-				} while (ec == error_code(error::address_in_use) && retries > 0);
-			}
-		}
-#endif // TORRENT_USE_OPENSSL
+					listen_succeeded_alert::socket_type_t const socket_type
+						= i->ssl
+						? listen_succeeded_alert::tcp_ssl
+						: listen_succeeded_alert::tcp;
 
-			if (!created_udp_socket && !s.ssl)
-			{
-				int retries = m_settings.get_int(settings_pack::max_retry_port_bind);
-				udp::endpoint bind_ep(s.local_endpoint.address(), s.local_endpoint.port());
-				do
+					m_alerts.emplace_alert<listen_succeeded_alert>(
+						bind_ep , socket_type);
+				}
+
+				bind_ep = i->udp_sock->local_endpoint(err);
+				if (!err && i->udp_sock->is_open())
 				{
-					ec.clear();
-					m_udp_socket.bind(bind_ep, ec);
-					if (ec)
-					{
-#ifndef TORRENT_DISABLE_LOGGING
-						session_log("cannot bind to UDP interface \"%s\": %s"
-							, print_endpoint(bind_ep).c_str(), ec.message().c_str());
-#endif
-						if (m_alerts.should_post<listen_failed_alert>())
-						{
-							error_code err;
-							m_alerts.emplace_alert<listen_failed_alert>(bind_ep.address().to_string(err)
-								, tcp::endpoint(bind_ep.address(), bind_ep.port())
-								, listen_failed_alert::bind
-								, ec, listen_failed_alert::udp);
-						}
-						--retries;
-						bind_ep.port(bind_ep.port() + 1);
-					}
-					else
-					{
-						created_udp_socket = true;
-						m_external_udp_port = m_udp_socket.local_port();
-						maybe_update_udp_mapping(0, false, bind_ep.port(), bind_ep.port());
-						maybe_update_udp_mapping(1, false, bind_ep.port(), bind_ep.port());
-					}
-				} while (ec == error_code(error::address_in_use) && retries > 0);
+					listen_succeeded_alert::socket_type_t const socket_type
+						= i->ssl
+						? listen_succeeded_alert::utp_ssl
+						: listen_succeeded_alert::udp;
+
+					m_alerts.emplace_alert<listen_succeeded_alert>(
+						bind_ep, socket_type);
+				}
 			}
-		}
-
-		// if we did not end up opening a udp socket, make sure we close any
-		// previous one
-#ifdef TORRENT_USE_OPENSSL
-		if (!created_ssl_udp_socket)
-		{
-			m_ssl_udp_socket.close();
-
-			// if there are mappings for the SSL socket, delete them now
-			if (m_ssl_udp_mapping[0] != -1 && m_natpmp)
-			{
-				m_natpmp->delete_mapping(m_ssl_udp_mapping[0]);
-				m_ssl_udp_mapping[0] = -1;
-			}
-			if (m_ssl_udp_mapping[1] != -1 && m_upnp)
-			{
-				m_upnp->delete_mapping(m_ssl_udp_mapping[1]);
-				m_ssl_udp_mapping[1] = -1;
-			}
-		}
-#endif
-		if (!created_udp_socket)
-		{
-			m_udp_socket.close();
-
-			// if there are mappings for the socket, delete them now
-			if (m_udp_mapping[0] != -1 && m_natpmp)
-			{
-				m_natpmp->delete_mapping(m_udp_mapping[0]);
-				m_udp_mapping[0] = -1;
-			}
-			if (m_udp_mapping[1] != -1 && m_upnp)
-			{
-				m_upnp->delete_mapping(m_udp_mapping[1]);
-				m_udp_mapping[1] = -1;
-			}
-		}
-
-		// we made it! now post all the listen_succeeded_alerts
-
-		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
-			, end(m_listen_sockets.end()); i != end; ++i)
-		{
-			listen_succeeded_alert::socket_type_t const socket_type = i->ssl
-				? listen_succeeded_alert::tcp_ssl
-				: listen_succeeded_alert::tcp;
-
-			if (!m_alerts.should_post<listen_succeeded_alert>()) continue;
-
-			error_code error;
-			tcp::endpoint bind_ep = i->sock->local_endpoint(error);
-			if (error) continue;
-
-			m_alerts.emplace_alert<listen_succeeded_alert>(
-				bind_ep , socket_type);
-		}
-
-#ifdef TORRENT_USE_OPENSSL
-		if (m_ssl_udp_socket.is_open())
-		{
-			error_code err;
-			if (m_alerts.should_post<listen_succeeded_alert>())
-				m_alerts.emplace_alert<listen_succeeded_alert>(
-					m_ssl_udp_socket.local_endpoint(err)
-						, listen_succeeded_alert::utp_ssl);
-		}
-#endif
-
-		if (m_udp_socket.is_open())
-		{
-			error_code err;
-			if (m_alerts.should_post<listen_succeeded_alert>())
-				m_alerts.emplace_alert<listen_succeeded_alert>(
-					m_udp_socket.local_endpoint(err)
-					, listen_succeeded_alert::udp);
 		}
 
 		if (m_settings.get_int(settings_pack::peer_tos) != 0)
@@ -2127,14 +2029,6 @@ namespace aux {
 		}
 
 		ec.clear();
-
-		set_socket_buffer_size(m_udp_socket, m_settings, ec);
-		if (ec)
-		{
-			if (m_alerts.should_post<udp_error_alert>())
-				m_alerts.emplace_alert<udp_error_alert>(udp::endpoint(), ec);
-		}
-*/
 
 		// initiate accepting on the listen sockets
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
@@ -2165,6 +2059,7 @@ namespace aux {
 			s.tcp_port_mapping[1] = m_upnp->add_mapping(upnp::tcp
 				, s.local_endpoint.port(), s.local_endpoint.port());
 		}
+		// TODO: 4 map udp socket as well
 	}
 
 	void session_impl::open_new_incoming_socks_connection()
@@ -5362,6 +5257,11 @@ namespace aux {
 		{
 			return ls.tcp_port_mapping[transport] == mapping;
 		}
+
+		bool find_udp_port_mapping(int transport, int mapping, listen_socket_t const& ls)
+		{
+			return ls.udp_port_mapping[transport] == mapping;
+		}
 	}
 
 	// transport is 0 for NAT-PMP and 1 for UPnP
@@ -5378,35 +5278,20 @@ namespace aux {
 				, map_transport, ec);
 		}
 
-/*
-		if (mapping == m_udp_mapping[map_transport] && port != 0)
-		{
-			m_external_udp_port = port;
-			if (m_alerts.should_post<portmap_alert>())
-				m_alerts.emplace_alert<portmap_alert>(mapping, port
-					, map_transport, protocol == natpmp::udp
-					? portmap_alert::udp : portmap_alert::tcp);
-			return;
-		}
-*/
-		if (ec)
-		{
-			if (m_alerts.should_post<portmap_error_alert>())
-				m_alerts.emplace_alert<portmap_error_alert>(mapping
-					, map_transport, ec);
-		}
-
-		// look throught our listen sockets to see if this mapping is for one of
-		// them (it could also be a user mapping)
-
 		// look through our listen sockets to see if this mapping is for one of
 		// them (it could also be a user mapping)
 
-		// TODO: 4 this just finds TCP mappings. How do we distinguish TCP from
-		// UDP?
 		std::list<listen_socket_t>::iterator ls
 			= std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
 			, boost::bind(find_tcp_port_mapping, map_transport, mapping, _1));
+
+		bool tcp = true;
+		if (ls == m_listen_sockets.end())
+		{
+			ls = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
+				, boost::bind(find_tcp_port_mapping, map_transport, mapping, _1));
+			tcp = false;
+		}
 
 		if (ls != m_listen_sockets.end())
 		{
@@ -5418,7 +5303,8 @@ namespace aux {
 			}
 
 			ls->external_address = ip;
-			ls->tcp_external_port = port;
+			if (tcp) ls->tcp_external_port = port;
+			else ls->udp_external_port = port;
 		}
 
 		if (!ec && m_alerts.should_post<portmap_alert>())
@@ -6029,6 +5915,7 @@ namespace aux {
 	{
 		error_code ec;
 
+		// TODO: 4 this should probably be factored into the udp_socket class
 #if TORRENT_USE_IPV6 && defined IPV6_TCLASS
 		if (m_udp_socket.local_endpoint(ec).address().is_v6())
 			m_udp_socket.set_option(traffic_class(m_settings.get_int(settings_pack::peer_tos)), ec);
@@ -6624,7 +6511,7 @@ namespace aux {
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			remap_ports(1, *i);
+			remap_ports(2, *i);
 		}
 
 		// TODO: 4 once the UDP sockets are part of m_listen_sockets this won't be
