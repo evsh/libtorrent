@@ -57,10 +57,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/debug.hpp"
 
-#if TORRENT_USE_RLIMIT
-#include <sys/resource.h>
-#endif
-
 #define DEBUG_DISK_THREAD 0
 
 #if __cplusplus >= 201103L || defined __clang__
@@ -192,9 +188,9 @@ namespace libtorrent
 
 #if TORRENT_USE_ASSERTS
 		// by now, all pieces should have been evicted
-		std::pair<block_cache::iterator, block_cache::iterator> pieces
-			= m_disk_cache.all_pieces();
-		TORRENT_ASSERT(pieces.first == pieces.second);
+//		std::pair<block_cache::iterator, block_cache::iterator> pieces
+//			= m_disk_cache.all_pieces();
+//		TORRENT_ASSERT(pieces.first == pieces.second);
 #endif
 
 		TORRENT_ASSERT(m_magic == 0x1337);
@@ -904,7 +900,7 @@ namespace libtorrent
 	// size limit. This means we should not restrict ourselves to contiguous
 	// blocks of write cache line size, but try to flush all old blocks
 	// this is why we pass in 1 as cont_block to the flushing functions
-	void disk_io_thread::try_flush_write_blocks(int num, jobqueue_t& completed_jobs
+	int disk_io_thread::try_flush_write_blocks(int num, jobqueue_t& completed_jobs
 		, mutex::scoped_lock& l)
 	{
 		DLOG("try_flush_write_blocks: %d\n", num);
@@ -948,7 +944,10 @@ namespace libtorrent
 		// not have had its flush_hashed job run on it
 		// so only do it if no other thread is currently flushing
 
-		if (num == 0 || m_stats_counters[counters::num_writing_threads] > 0) return;
+		if (num == 0 || m_stats_counters[counters::num_writing_threads] > 0)
+		{
+			return num;
+		}
 
 		// if we still need to flush blocks, start over and flush
 		// everything in LRU order (degrade to lru cache eviction)
@@ -976,6 +975,7 @@ namespace libtorrent
 
 			m_disk_cache.maybe_free_piece(pe);
 		}
+		return num;
 	}
 
 	void disk_io_thread::flush_expired_write_blocks(jobqueue_t& completed_jobs
@@ -1066,26 +1066,43 @@ namespace libtorrent
 	// below the number of blocks we flushed by the time we're done flushing
 	// that's why we need to call this fairly often. Both before and after
 	// a disk job is executed
-	void disk_io_thread::check_cache_level(mutex::scoped_lock& l, jobqueue_t& completed_jobs)
+	void disk_io_thread::check_cache_level(mutex::scoped_lock& l
+		, jobqueue_t& completed_jobs)
 	{
+		int num_evicted = 0;
+
 		// when the read cache is disabled, always try to evict all read cache
 		// blocks
 		if (!m_settings.get_bool(settings_pack::use_read_cache))
 		{
 			int const evict = m_disk_cache.read_cache_size();
-			m_disk_cache.try_evict_blocks(evict);
+			int const left = m_disk_cache.try_evict_blocks(evict);
+			num_evicted += evict - left;
 		}
 
-		int evict = m_disk_cache.num_to_evict(0);
+		int const evict = m_disk_cache.num_to_evict(0);
 		if (evict > 0)
 		{
-			evict = m_disk_cache.try_evict_blocks(evict);
+			int const left = m_disk_cache.try_evict_blocks(evict);
+			num_evicted += evict - left;
 			// don't evict write jobs if at least one other thread
 			// is flushing right now. Doing so could result in
 			// unnecessary flushing of the wrong pieces
-			if (evict > 0 && m_stats_counters[counters::num_writing_threads] == 0)
+			if (left > 0 && m_stats_counters[counters::num_writing_threads] == 0)
 			{
-				try_flush_write_blocks(evict, completed_jobs, l);
+				int const left2 = try_flush_write_blocks(left, completed_jobs, l);
+				num_evicted += evict - left2;
+			}
+		}
+
+		// if we have jobs waiting for disk buffers to free up, add them back to
+		// the job queue now, since some were freed
+		if (num_evicted > 0)
+		{
+			mutex::scoped_lock l2(m_job_mutex);
+			if (!m_waiting_for_buffer.empty())
+			{
+				m_queued_jobs.prepend(m_waiting_for_buffer);
 			}
 		}
 	}
@@ -1149,7 +1166,15 @@ namespace libtorrent
 		}
 		l.unlock();
 
-		if (ret == retry_job)
+		if (ret == need_disk_buffer)
+		{
+			mutex::scoped_lock l2(m_job_mutex);
+			// this job failed because we're out of memory. We hang it on this
+			// queue to be re-run once at least one disk cache block frees up.
+			m_waiting_for_buffer.push_back(j);
+			return;
+		}
+		else if (ret == retry_job)
 		{
 			mutex::scoped_lock l2(m_job_mutex);
 			// to avoid busy looping here, give up
@@ -1183,9 +1208,8 @@ namespace libtorrent
 		j->buffer.disk_block = m_disk_cache.allocate_buffer("send buffer");
 		if (j->buffer.disk_block == 0)
 		{
-			j->error.ec = error::no_memory;
-			j->error.operation = storage_error::alloc_cache_piece;
-			return -1;
+			// rerun once there's a free block in the disk cache
+			return need_disk_buffer;
 		}
 
 		time_point start_time = clock_type::now();
@@ -1686,7 +1710,7 @@ namespace libtorrent
 		l2_.unlock();
 #endif
 
-#if !defined TORRENT_DISABLE_POOL_ALLOCATOR && TORRENT_USE_ASSERTS
+#if TORRENT_USE_ASSERTS
 		mutex::scoped_lock l_(m_cache_mutex);
 		TORRENT_ASSERT(m_disk_cache.is_disk_buffer(j->buffer.disk_block));
 		l_.unlock();
@@ -2225,6 +2249,7 @@ namespace libtorrent
 
 		file::iovec_t iov;
 		iov.iov_base = m_disk_cache.allocate_buffer("hashing");
+		if (iov.iov_base == NULL) return need_disk_buffer;
 		hasher h;
 		int ret = 0;
 		int offset = 0;
@@ -2396,6 +2421,8 @@ namespace libtorrent
 			}
 			else
 			{
+				// TODO: introduce a holder object for a disk buffer, to avoid
+				// having to manually free it later
 				iov.iov_base = m_disk_cache.allocate_buffer("hashing");
 
 				if (iov.iov_base == NULL)
@@ -2409,15 +2436,11 @@ namespace libtorrent
 						m_disk_cache.dec_block_refcount(pe, locked_blocks[k], block_cache::ref_hashing);
 
 					--pe->piece_refcount;
-					pe->hashing = false;
-					delete pe->hash;
-					pe->hash = NULL;
 
-					m_disk_cache.maybe_free_piece(pe);
-
-					j->error.ec = errors::no_memory;
-					j->error.operation = storage_error::alloc_cache_piece;
-					return -1;
+					// the only state we've changed so far is to progress the sha-1
+					// cursor. It's safe to retry this job later, once there's a
+					// free buffer
+					return need_disk_buffer;
 				}
 
 				DLOG("do_hash: reading (piece: %d block: %d)\n", int(pe->piece), i);
@@ -2452,7 +2475,7 @@ namespace libtorrent
 
 				if (!j->error.ec)
 				{
-					boost::uint32_t read_time = total_microseconds(clock_type::now() - start_time);
+					boost::uint32_t const read_time = total_microseconds(clock_type::now() - start_time);
 					m_read_time.add_sample(read_time);
 
 					m_stats_counters.inc_stats_counter(counters::num_read_back);

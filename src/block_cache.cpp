@@ -744,9 +744,7 @@ void block_cache::mark_deleted(file_storage const& fs)
 
 cached_piece_entry* block_cache::add_dirty_block(disk_io_job* j)
 {
-#if !defined TORRENT_DISABLE_POOL_ALLOCATOR
 	TORRENT_ASSERT(is_disk_buffer(j->buffer.disk_block));
-#endif
 #ifdef TORRENT_EXPENSIVE_INVARIANT_CHECKS
 	INVARIANT_CHECK;
 #endif
@@ -1700,7 +1698,7 @@ void block_cache::check_invariant() const
 		{
 			if (p.blocks[k].buf)
 			{
-#if !defined TORRENT_DISABLE_POOL_ALLOCATOR && defined TORRENT_EXPENSIVE_INVARIANT_CHECKS
+#if defined TORRENT_EXPENSIVE_INVARIANT_CHECKS
 				TORRENT_PIECE_ASSERT(is_disk_buffer(p.blocks[k].buf), &p);
 
 				// make sure we don't have the same buffer

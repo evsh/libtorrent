@@ -40,7 +40,7 @@ namespace libtorrent
 	template <typename T>
 	struct tailqueue_node
 	{
-		tailqueue_node() : next(0) {}
+		tailqueue_node() : next(NULL) {}
 		T* next;
 	};
 
@@ -81,12 +81,12 @@ namespace libtorrent
 
 		void append(tailqueue<T>& rhs)
 		{
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
-			TORRENT_ASSERT(rhs.m_last == 0 || rhs.m_last->next == 0);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
+			TORRENT_ASSERT(rhs.m_last == NULL || rhs.m_last->next == NULL);
 
-			if (rhs.m_first == 0) return;
+			if (rhs.m_first == NULL) return;
 
-			if (m_first == 0)
+			if (m_first == NULL)
 			{
 				swap(rhs);
 				return;
@@ -95,21 +95,23 @@ namespace libtorrent
 			m_last->next = rhs.m_first;
 			m_last = rhs.m_last;
 			m_size += rhs.m_size;
-			rhs.m_first = 0;
-			rhs.m_last = 0;
+			rhs.m_first = NULL;
+			rhs.m_last = NULL;
 			rhs.m_size = 0;
 
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
 		}
 
 		void prepend(tailqueue<T>& rhs)
 		{
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
-			TORRENT_ASSERT(rhs.m_last == 0 || rhs.m_last->next == 0);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
+			TORRENT_ASSERT(rhs.m_last == NULL || rhs.m_last->next == NULL);
+			TORRENT_ASSERT((m_last == NULL) == (m_first == NULL));
+			TORRENT_ASSERT((rhs.m_last == NULL) == (rhs.m_first == NULL));
 
-			if (rhs.m_first == 0) return;
+			if (rhs.m_first == NULL) return;
 
-			if (m_first == 0)
+			if (m_first == NULL)
 			{
 				swap(rhs);
 				return;
@@ -117,22 +119,25 @@ namespace libtorrent
 
 			swap(rhs);
 			append(rhs);
+// #error make sure the m_last pointer is updated correctly here
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
+			TORRENT_ASSERT(rhs.m_last == NULL || rhs.m_last->next == NULL);
 		}
 
 		T* pop_front()
 		{
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
 			T* e = m_first;
 			m_first = m_first->next;
-			if (e == m_last) m_last = 0;
-			e->next = 0;
+			if (e == m_last) m_last = NULL;
+			e->next = NULL;
 			--m_size;
 			return e;
 		}
 		void push_front(T* e)
 		{
-			TORRENT_ASSERT(e->next == 0);
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
+			TORRENT_ASSERT(e->next == NULL);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
 			e->next = m_first;
 			m_first = e;
 			if (!m_last) m_last = e;
@@ -140,20 +145,20 @@ namespace libtorrent
 		}
 		void push_back(T* e)
 		{
-			TORRENT_ASSERT(e->next == 0);
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
+			TORRENT_ASSERT(e->next == NULL);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
 			if (m_last) m_last->next = e;
 			else m_first = e;
 			m_last = e;
-			e->next = 0;
+			e->next = NULL;
 			++m_size;
 		}
 		T* get_all()
 		{
-			TORRENT_ASSERT(m_last == 0 || m_last->next == 0);
+			TORRENT_ASSERT(m_last == NULL || m_last->next == NULL);
 			T* e = m_first;
-			m_first = 0;
-			m_last = 0;
+			m_first = NULL;
+			m_last = NULL;
 			m_size = 0;
 			return e;
 		}

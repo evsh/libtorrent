@@ -42,18 +42,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <boost/function.hpp>
 #include <boost/utility.hpp>
 
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-#include "libtorrent/allocator.hpp" // for page_aligned_allocator
-#include <boost/pool/pool.hpp>
-#endif
-
-#if defined TORRENT_DEBUG || TORRENT_RELEASE_ASSERTS
-#include <set>
-#endif
-
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 #include "libtorrent/thread.hpp"
+#include "libtorrent/bitfield.hpp"
 #include "libtorrent/io_service_fwd.hpp"
 #include "libtorrent/file.hpp" // for iovec_t
 
@@ -103,6 +95,9 @@ namespace libtorrent
 		void free_buffer_impl(char* buf, mutex::scoped_lock& l);
 		char* allocate_buffer_impl(mutex::scoped_lock& l, char const* category);
 
+		void allocate_pool(error_code& ec);
+		void free_pool();
+
 		// number of bytes per block. The BitTorrent
 		// protocol defines the block size to 16 KiB.
 		const int m_block_size;
@@ -141,49 +136,26 @@ namespace libtorrent
 
 		mutable mutex m_pool_mutex;
 
-		int m_cache_buffer_chunk_size;
-
-#if TORRENT_HAVE_MMAP
-		// the file descriptor of the cache mmap file
-		int m_cache_fd;
 		// the pointer to the block of virtual address space
 		// making up the mmapped cache space
 		char* m_cache_pool;
+
+		// the actual size, in bytes, of the memory block at m_cache_pool
+		boost::int64_t m_pool_size;
+
+		// TODO: 4 this should really be a bitfield, and we should scan it from
+		// left to right for empty blocks
+
 		// list of block indices that are not in use. block_index
 		// times 0x4000 + m_cache_pool is the address where the
 		// corresponding memory lives
 		std::vector<int> m_free_list;
-#endif
-
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-		// if this is true, all buffers are allocated
-		// from m_pool. If this is false, all buffers
-		// are allocated using page_aligned_allocator.
-		// if the settings change to prefer the other
-		// allocator, this bool will not switch over
-		// to match the settings until all buffers have
-		// been freed. That way, we never have a mixture
-		// of buffers allocated from different sources.
-		// in essence, this make the setting only take
-		// effect after a restart (which seems fine).
-		// or once the client goes idle for a while.
-		bool m_using_pool_allocator;
-
-		// this is the actual user setting
-		bool m_want_pool_allocator;
-
-		// memory pool for read and write operations
-		// and disk cache
-		boost::pool<page_aligned_allocator> m_pool;
-#endif
 
 		// this is specifically exempt from release_asserts
 		// since it's a quite costly check. Only for debug
 		// builds.
-#if defined TORRENT_DEBUG
-		std::set<char*> m_buffers_in_use;
-#endif
 #if TORRENT_USE_ASSERTS
+		bitfield m_buffers_in_use;
 		int m_magic;
 		bool m_settings_set;
 #endif

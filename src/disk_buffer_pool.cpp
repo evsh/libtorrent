@@ -60,6 +60,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <linux/unistd.h>
 #endif
 
+static void* const map_failed = MAP_FAILED;
+
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 namespace libtorrent
@@ -69,15 +71,15 @@ namespace libtorrent
 	// this is posted to the network thread
 	void watermark_callback(std::vector<boost::weak_ptr<disk_observer> >* cbs)
 	{
-		if (cbs != NULL)
+		if (cbs == NULL) return;
+		boost::scoped_ptr<std::vector<boost::weak_ptr<disk_observer> > > holder(
+			cbs);
+
+		for (std::vector<boost::weak_ptr<disk_observer> >::iterator i = cbs->begin()
+			, end(cbs->end()); i != end; ++i)
 		{
-			for (std::vector<boost::weak_ptr<disk_observer> >::iterator i = cbs->begin()
-				, end(cbs->end()); i != end; ++i)
-			{
-				boost::shared_ptr<disk_observer> o = i->lock();
-				if (o) o->on_disk();
-			}
-			delete cbs;
+			boost::shared_ptr<disk_observer> o = i->lock();
+			if (o) o->on_disk();
 		}
 	}
 
@@ -92,16 +94,8 @@ namespace libtorrent
 		, m_trigger_cache_trim(trigger_trim)
 		, m_exceeded_max_size(false)
 		, m_ios(ios)
-		, m_cache_buffer_chunk_size(0)
-#if TORRENT_HAVE_MMAP
-		, m_cache_fd(-1)
-		, m_cache_pool(0)
-#endif
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-		, m_using_pool_allocator(false)
-		, m_want_pool_allocator(false)
-		, m_pool(block_size, 32)
-#endif
+		, m_cache_pool(NULL)
+		, m_pool_size(0)
 	{
 #if TORRENT_USE_ASSERTS
 		m_magic = 0x1337;
@@ -116,18 +110,7 @@ namespace libtorrent
 		m_magic = 0;
 #endif
 
-#if TORRENT_HAVE_MMAP
-		if (m_cache_pool)
-		{
-			munmap(m_cache_pool, boost::uint64_t(m_max_use) * 0x4000);
-			m_cache_pool = 0;
-			// attempt to make MacOS not flush this to disk, making close()
-			// block for a long time
-			ftruncate(m_cache_fd, 0);
-			close(m_cache_fd);
-			m_cache_fd = -1;
-		}
-#endif
+		free_pool();
 	}
 
 	boost::uint32_t disk_buffer_pool::num_to_evict(int num_needed)
@@ -174,26 +157,12 @@ namespace libtorrent
 		TORRENT_ASSERT(l.locked());
 		TORRENT_UNUSED(l);
 
-#if TORRENT_HAVE_MMAP
 		if (m_cache_pool)
 		{
 			return buffer >= m_cache_pool && buffer < m_cache_pool
-				+ boost::uint64_t(m_max_use) * 0x4000;
+				+ boost::uint64_t(m_max_use) * m_block_size;
 		}
-#endif
-
-#if defined TORRENT_DEBUG
-		return m_buffers_in_use.count(buffer) == 1;
-#elif defined TORRENT_DEBUG_BUFFERS
-		return page_aligned_allocator::in_use(buffer);
-#elif defined TORRENT_DISABLE_POOL_ALLOCATOR
-		return true;
-#else
-		if (m_using_pool_allocator)
-			return m_pool.is_from(buffer);
-		else
-			return true;
-#endif
+		return false;
 	}
 
 	bool disk_buffer_pool::is_disk_buffer(char* buffer) const
@@ -201,7 +170,7 @@ namespace libtorrent
 		mutex::scoped_lock l(m_pool_mutex);
 		return is_disk_buffer(buffer, l);
 	}
-#endif
+#endif // TORRENT_USE_ASSERTS
 
 	char* disk_buffer_pool::allocate_buffer(char const* category)
 	{
@@ -268,81 +237,46 @@ namespace libtorrent
 		TORRENT_ASSERT(l.locked());
 		TORRENT_UNUSED(l);
 
+		if (m_cache_pool == NULL)
+		{
+			error_code ec;
+			allocate_pool(ec);
+			if (ec) return NULL;
+		}
+
 		char* ret;
-#if TORRENT_HAVE_MMAP
-		if (m_cache_pool)
-		{
-			if (m_free_list.size() <= (m_max_use - m_low_watermark)
-				/ 2 && !m_exceeded_max_size)
-			{
-				m_exceeded_max_size = true;
-				m_trigger_cache_trim();
-			}
-			if (m_free_list.empty()) return 0;
-			boost::uint64_t slot_index = m_free_list.back();
-			m_free_list.pop_back();
-			ret = m_cache_pool + (slot_index * 0x4000);
-			TORRENT_ASSERT(is_disk_buffer(ret, l));
-		}
-		else
-#endif
-		{
-#if defined TORRENT_DISABLE_POOL_ALLOCATOR
-
-			ret = page_aligned_allocator::malloc(m_block_size);
-
-#else
-			if (m_using_pool_allocator)
-			{
-				int const effective_block_size
-					= m_in_use >= m_max_use
-					? 20 // use small increments once we've exceeded the cache size
-					: m_cache_buffer_chunk_size
-					? m_cache_buffer_chunk_size
-					: (std::max)(m_max_use / 10, 1);
-				m_pool.set_next_size(effective_block_size);
-				ret = static_cast<char*>(m_pool.malloc());
-			}
-			else
-			{
-				ret = page_aligned_allocator::malloc(m_block_size);
-			}
-#endif
-			if (ret == NULL)
-			{
-				m_exceeded_max_size = true;
-				m_trigger_cache_trim();
-				return 0;
-			}
-		}
-
-#if defined TORRENT_DEBUG
-		TORRENT_ASSERT(m_buffers_in_use.count(ret) == 0);
-		m_buffers_in_use.insert(ret);
-#endif
-
-		++m_in_use;
-		if (m_in_use >= m_low_watermark + (m_max_use - m_low_watermark)
+		if (m_free_list.size() <= (m_max_use - m_low_watermark)
 			/ 2 && !m_exceeded_max_size)
 		{
 			m_exceeded_max_size = true;
 			m_trigger_cache_trim();
 		}
 
+		if (m_free_list.empty()) return NULL;
+		boost::uint64_t const slot_index = m_free_list.back();
+		m_free_list.pop_back();
+		ret = m_cache_pool + (slot_index * m_block_size);
 		TORRENT_ASSERT(is_disk_buffer(ret, l));
+#if TORRENT_USE_ASSERTS
+		TORRENT_ASSERT(m_buffers_in_use.get_bit(slot_index) == false);
+		m_buffers_in_use.set_bit(slot_index);
+#endif
+		++m_in_use;
 		return ret;
 	}
 
-	void disk_buffer_pool::free_multiple_buffers(char** bufvec, int numbufs)
+	void disk_buffer_pool::free_multiple_buffers(char** bufvec, int const numbufs)
 	{
-		char** end = bufvec + numbufs;
+		char** const end = bufvec + numbufs;
+
+		// TODO: 4 does this make sense?
 		// sort the pointers in order to maximize cache hits
 		std::sort(bufvec, end);
 
 		mutex::scoped_lock l(m_pool_mutex);
 		for (; bufvec != end; ++bufvec)
 		{
-			char* buf = *bufvec;
+			char* const buf = *bufvec;
 			TORRENT_ASSERT(buf);
 			free_buffer_impl(buf, l);
 		}
@@ -364,148 +298,63 @@ namespace libtorrent
 
 		mutex::scoped_lock l(m_pool_mutex);
 
-		// 0 cache_buffer_chunk_size means 'automatic' (i.e.
-		// proportional to the total disk cache size)
-		m_cache_buffer_chunk_size = sett.get_int(settings_pack::cache_buffer_chunk_size);
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-		// if the chunk size is set to 1, there's no point in creating a pool
-		m_want_pool_allocator = sett.get_bool(settings_pack::use_disk_cache_pool)
-			&& (m_cache_buffer_chunk_size != 1);
-		// if there are no allocated blocks, it's OK to switch allocator
-		if (m_in_use == 0)
-			m_using_pool_allocator = m_want_pool_allocator;
-#endif
-
-#if TORRENT_HAVE_MMAP
-		// if we've already allocated an mmap, we can't change
-		// anything unless there are no allocations in use
+		// we can only change the cache size when it's unused. Since the whole
+		// cache is allocated as a single blob, to support resizing otherwise
+		// would require creating copies of every block (at least dirty blocks)
+		// and update all pointers in the block_cache.
 		if (m_cache_pool && m_in_use > 0) return;
-#endif
 
-		// only allow changing size if we're not using mmapped
-		// cache, or if we're just about to turn it off
-		if (
-#if TORRENT_HAVE_MMAP
-			m_cache_pool == 0 ||
-#endif
-			sett.get_str(settings_pack::mmap_cache).empty())
+		int const cache_size = sett.get_int(settings_pack::cache_size);
+		if (cache_size < 0)
 		{
-			int const cache_size = sett.get_int(settings_pack::cache_size);
-			if (cache_size < 0)
-			{
-				boost::uint64_t phys_ram = total_physical_ram();
-				if (phys_ram == 0) m_max_use = 1024;
-				else
-				{
-					// this is the logic to calculate the automatic disk cache size
-					// based on the amount of physical RAM.
-					// The more physical RAM, the smaller portion of it is allocated
-					// for the cache.
+			boost::uint64_t phys_ram = total_physical_ram();
+			boost::int64_t const gb = 1024 * 1024 * 1024;
+			if (phys_ram <= gb) m_max_use = 256;
+			else if (phys_ram <= 4 * gb) m_max_use = 1024;
+			else m_max_use = 4096;
+		}
+		else
+		{
+			m_max_use = cache_size;
+		}
 
-					// we take a 30th of everything exceeding 4 GiB
-					// a 20th of everything exceeding 1 GiB
-					// and a 10th of everything below a GiB
+		// 32 bit builds should capped below 2 GB of memory, even
+		// when more actual ram is available, because we're still
+		// constrained by the 32 bit virtual address space.
+		if (sizeof(void*) == 4)
+		{
+			m_max_use = (std::min)(2 * 1024 * 1024 * 3 / 4 * 1024
+				/ m_block_size, m_max_use);
+		}
 
-					boost::int64_t const gb = 1024 * 1024 * 1024;
+		// we need some space to store buffers in. If the cache size would be
+		// literally zero, no operation could ever complete, as both reading and
+		// writing requires buffers to transfer data between the disk I/O threads
+		// and the network thread.
+		if (m_max_use < 4) m_max_use = 4;
 
-					boost::int64_t result = 0;
-					if (phys_ram > 4 * gb)
-					{
-						result += (phys_ram - 4 * gb) / 30;
-						phys_ram = 4 * gb;
-					}
-					if (phys_ram > 1 * gb)
-					{
-						result += (phys_ram - 1 * gb) / 20;
-						phys_ram = 1 * gb;
-					}
-					result += phys_ram / 10;
-					m_max_use = result / m_block_size;
-				}
-
-				if (sizeof(void*) == 4)
-				{
-					// 32 bit builds should  capped below 2 GB of memory, even
-					// when more actual ram is available, because we're still
-					// constrained by the 32 bit virtual address space.
-					m_max_use = (std::min)(2 * 1024 * 1024 * 3 / 4 * 1024
-						/ m_block_size, m_max_use);
-				}
-			}
-			else
-			{
-				m_max_use = cache_size;
-			}
-			m_low_watermark = m_max_use - (std::max)(16, sett.get_int(settings_pack::max_queued_disk_bytes) / 0x4000);
-			if (m_low_watermark < 0) m_low_watermark = 0;
-			if (m_in_use >= m_max_use && !m_exceeded_max_size)
-			{
-				m_exceeded_max_size = true;
-				m_trigger_cache_trim();
-			}
-			if (m_cache_buffer_chunk_size > m_max_use)
-				m_cache_buffer_chunk_size = m_max_use;
+		m_low_watermark = m_max_use - (std::max)(16, sett.get_int(settings_pack::max_queued_disk_bytes) / m_block_size);
+		if (m_low_watermark < 0) m_low_watermark = 0;
+		if (m_in_use >= m_max_use && !m_exceeded_max_size)
+		{
+			m_exceeded_max_size = true;
+			m_trigger_cache_trim();
 		}
 
 #if TORRENT_USE_ASSERTS
 		m_settings_set = true;
 #endif
 
-#if TORRENT_HAVE_MMAP
-		// #error support resizing the map
-		if (m_cache_pool && sett.get_str(settings_pack::mmap_cache).empty())
+		if (m_cache_pool && m_pool_size != m_max_use * m_block_size)
 		{
 			TORRENT_ASSERT(m_in_use == 0);
-			munmap(m_cache_pool, boost::uint64_t(m_max_use) * 0x4000);
-			m_cache_pool = 0;
-			// attempt to make MacOS not flush this to disk, making close()
-			// block for a long time
-			ftruncate(m_cache_fd, 0);
-			close(m_cache_fd);
-			m_cache_fd = -1;
-			std::vector<int>().swap(m_free_list);
+			free_pool();
 		}
-		else if (m_cache_pool == 0 && !sett.get_str(settings_pack::mmap_cache).empty())
-		{
-			// O_TRUNC here is because we don't actually care about what's
-			// in the file now, there's no need to ever read that into RAM
-#ifndef O_EXLOCK
-#define O_EXLOCK 0
-#endif
-			m_cache_fd = open(sett.get_str(settings_pack::mmap_cache).c_str(), O_RDWR | O_CREAT | O_EXLOCK | O_TRUNC, 0700);
-			if (m_cache_fd < 0)
-			{
-				ec.assign(errno, boost::system::system_category());
-			}
-			else
-			{
-#ifndef MAP_NOCACHE
-#define MAP_NOCACHE 0
-#endif
-				ftruncate(m_cache_fd, boost::uint64_t(m_max_use) * 0x4000);
-				m_cache_pool = static_cast<char*>(mmap(0, boost::uint64_t(m_max_use) * 0x4000, PROT_READ | PROT_WRITE
-					, MAP_SHARED | MAP_NOCACHE, m_cache_fd, 0));
-				if (intptr_t(m_cache_pool) == -1)
-				{
-					ec.assign(errno, boost::system::system_category());
 
-					m_cache_pool = 0;
-					// attempt to make MacOS not flush this to disk, making close()
-					// block for a long time
-					ftruncate(m_cache_fd, 0);
-					close(m_cache_fd);
-					m_cache_fd = -1;
-				}
-				else
-				{
-					TORRENT_ASSERT((size_t(m_cache_pool) & 0xfff) == 0);
-					m_free_list.reserve(m_max_use);
-					for (int i = 0; i < m_max_use; ++i)
-						m_free_list.push_back(i);
-				}
-			}
+		if (m_cache_pool == NULL)
+		{
+			allocate_pool(ec);
 		}
-#endif
 	}
 
 	void disk_buffer_pool::free_buffer_impl(char* buf, mutex::scoped_lock& l)
@@ -517,67 +366,88 @@ namespace libtorrent
 		TORRENT_ASSERT(l.locked());
 		TORRENT_UNUSED(l);
 
-#if TORRENT_HAVE_MMAP
-		if (m_cache_pool)
-		{
-			TORRENT_ASSERT(buf >= m_cache_pool);
-			TORRENT_ASSERT(buf <  m_cache_pool + boost::uint64_t(m_max_use) * 0x4000);
-			int slot_index = (buf - m_cache_pool) / 0x4000;
-			m_free_list.push_back(slot_index);
-#if defined MADV_FREE
-			// tell the virtual memory system that we don't actually care
-			// about the data in these pages anymore. If this block was
-			// swapped out to the SSD, it (hopefully) means it won't have
-			// to be read back in once we start writing our new data to it
-			madvise(buf, 0x4000, MADV_FREE);
-#elif defined MADV_DONTNEED && defined TORRENT_LINUX
-			// rumor has it that MADV_DONTNEED is in fact destructive
-			// on linux (i.e. it won't flush it to disk or re-read from disk)
-			// http://kerneltrap.org/mailarchive/linux-kernel/2007/5/1/84410
-			madvise(buf, 0x4000, MADV_DONTNEED);
-#endif
-		}
-		else
-#endif
-		{
-#if defined TORRENT_DISABLE_POOL_ALLOCATOR
+		TORRENT_ASSERT(buf >= m_cache_pool);
+		TORRENT_ASSERT(buf <  m_cache_pool + boost::uint64_t(m_max_use) * m_block_size);
+		int slot_index = (buf - m_cache_pool) / m_block_size;
+		m_free_list.push_back(slot_index);
 
-		page_aligned_allocator::free(buf);
-
-#else
-		if (m_using_pool_allocator)
-			m_pool.free(buf);
-		else
-			page_aligned_allocator::free(buf);
-#endif // TORRENT_DISABLE_POOL_ALLOCATOR
-		}
-
-#if defined TORRENT_DEBUG
-		std::set<char*>::iterator i = m_buffers_in_use.find(buf);
-		TORRENT_ASSERT(i != m_buffers_in_use.end());
-		m_buffers_in_use.erase(i);
+#if TORRENT_USE_ASSERTS
+		TORRENT_ASSERT(m_buffers_in_use.get_bit(slot_index));
+		m_buffers_in_use.clear_bit(slot_index);
 #endif
 
 		--m_in_use;
+	}
 
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-		// should we switch which allocator to use?
-		if (m_in_use == 0 && m_want_pool_allocator != m_using_pool_allocator)
+	void disk_buffer_pool::allocate_pool(error_code& ec)
+	{
+		if (m_cache_pool != NULL) return;
+
+		m_pool_size = boost::uint64_t(m_max_use) * m_block_size;
+#if TORRENT_HAVE_MMAP
+		void* ret = mmap(0
+			, m_pool_size, PROT_READ | PROT_WRITE
+			, MAP_PRIVATE | MAP_ANON, 0, 0);
+
+		if (ret == map_failed)
 		{
-			m_pool.release_memory();
-			m_using_pool_allocator = m_want_pool_allocator;
+			ec.assign(errno, boost::system::system_category());
+			m_cache_pool = NULL;
+			m_pool_size = 0;
+			return;
 		}
+		m_cache_pool = static_cast<char*>(ret);
+#else
+		m_cache_pool = static_cast<char*>(valloc(m_pool_size));
+#endif
+		TORRENT_ASSERT((size_t(m_cache_pool) & 0xfff) == 0);
+
+		// TODO: 4 this should be a bitfield
+		m_free_list.reserve(m_max_use);
+		for (int i = m_max_use-1; i >= 0; --i)
+			m_free_list.push_back(i);
+
+#if TORRENT_USE_ASSERTS
+		m_buffers_in_use.resize(m_max_use);
+		m_buffers_in_use.clear_all();
 #endif
 	}
 
+	void disk_buffer_pool::free_pool()
+	{
+#if TORRENT_HAVE_MMAP
+		munmap(m_cache_pool, m_pool_size);
+#else
+		free(m_cache_pool);
+#endif
+		m_cache_pool = NULL;
+		m_pool_size = 0;
+		std::vector<int>().swap(m_free_list);
+#if TORRENT_USE_ASSERTS
+		m_buffers_in_use.clear();
+#endif
+	}
+
+	// TODO: 4 figure out when this is called. Maybe this is a good time to
+	// attempt running MADV_FREE
 	void disk_buffer_pool::release_memory()
 	{
 		TORRENT_ASSERT(m_magic == 0x1337);
-#ifndef TORRENT_DISABLE_POOL_ALLOCATOR
-		mutex::scoped_lock l(m_pool_mutex);
-		if (m_using_pool_allocator)
-			m_pool.release_memory();
+/*
+#if defined MADV_FREE
+		// tell the virtual memory system that we don't actually care
+		// about the data in these pages anymore. If this block was
+		// swapped out to the SSD, it (hopefully) means it won't have
+		// to be read back in once we start writing our new data to it
+		madvise(buf, m_block_size, MADV_FREE);
+#elif defined MADV_DONTNEED && defined TORRENT_LINUX
+		// rumor has it that MADV_DONTNEED is in fact destructive
+		// on linux (i.e. it won't flush it to disk or re-read from disk)
+		// http://kerneltrap.org/mailarchive/linux-kernel/2007/5/1/84410
+		madvise(buf, m_block_size, MADV_DONTNEED);
 #endif
+*/
+
 	}
 
 }
