@@ -48,20 +48,6 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <boost/system/error_code.hpp>
 #include <boost/shared_ptr.hpp>
 
-#if TORRENT_HAVE_MMAP
-#include <sys/mman.h>
-#endif
-
-#ifdef TORRENT_BSD
-#include <sys/sysctl.h>
-#endif
-
-#ifdef TORRENT_LINUX
-#include <linux/unistd.h>
-#endif
-
-static void* const map_failed = MAP_FAILED;
-
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 namespace libtorrent
@@ -384,22 +370,9 @@ namespace libtorrent
 		if (m_cache_pool != NULL) return;
 
 		m_pool_size = boost::uint64_t(m_max_use) * m_block_size;
-#if TORRENT_HAVE_MMAP
-		void* ret = mmap(0
-			, m_pool_size, PROT_READ | PROT_WRITE
-			, MAP_PRIVATE | MAP_ANON, 0, 0);
+		m_cache_pool = page_allocate(m_pool_size);
 
-		if (ret == map_failed)
-		{
-			ec.assign(errno, boost::system::system_category());
-			m_cache_pool = NULL;
-			m_pool_size = 0;
-			return;
-		}
-		m_cache_pool = static_cast<char*>(ret);
-#else
-		m_cache_pool = static_cast<char*>(valloc(m_pool_size));
-#endif
+		// make sure it's page aligned
 		TORRENT_ASSERT((size_t(m_cache_pool) & 0xfff) == 0);
 
 		// TODO: 4 this should be a bitfield
@@ -415,11 +388,8 @@ namespace libtorrent
 
 	void disk_buffer_pool::free_pool()
 	{
-#if TORRENT_HAVE_MMAP
-		munmap(m_cache_pool, m_pool_size);
-#else
-		free(m_cache_pool);
-#endif
+		page_free(m_cache_pool, m_pool_size);
+
 		m_cache_pool = NULL;
 		m_pool_size = 0;
 		std::vector<int>().swap(m_free_list);

@@ -35,24 +35,17 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <cstddef>
 #include "libtorrent/config.hpp"
+#include <boost/cstdint.hpp>
 
 namespace libtorrent
 {
-
 	TORRENT_EXTRA_EXPORT int page_size();
 
-	struct TORRENT_EXTRA_EXPORT page_aligned_allocator
-	{
-		typedef int size_type;
-		typedef std::ptrdiff_t difference_type;
-
-		static char* malloc(size_type bytes);
-		static void free(char* block);
-#ifdef TORRENT_DEBUG_BUFFERS
-		static bool in_use(char const* block);
-#endif
-	};
-
+	// these allocation functions are meant to be used for large memory
+	// allocations (large means at least megabytes). The memory area that's
+	// allocated is page aligned.
+	TORRENT_EXTRA_EXPORT char* page_allocate(boost::int64_t bytes);
+	TORRENT_EXTRA_EXPORT void page_free(char* block, boost::int64_t size);
 }
 
 #endif

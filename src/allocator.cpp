@@ -33,6 +33,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/allocator.hpp"
 #include "libtorrent/config.hpp"
 #include "libtorrent/assert.hpp" // for print_backtrace
+
+#include "libtorrent/aux_/disable_warnings_push.hpp"
+
 #include <boost/cstdint.hpp>
 
 #if defined TORRENT_BEOS
@@ -42,6 +45,21 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <stdlib.h> // posix_memalign/free
 #include <unistd.h> // _SC_PAGESIZE
 #endif
+
+#if TORRENT_HAVE_MMAP
+#include <sys/mman.h>
+#endif
+
+#ifdef TORRENT_BSD
+#include <sys/sysctl.h>
+#endif
+
+#ifdef TORRENT_LINUX
+#include <linux/unistd.h>
+#endif
+
+static void* const map_failed = MAP_FAILED;
+
 
 #if TORRENT_USE_MEMALIGN || TORRENT_USE_POSIX_MEMALIGN || defined TORRENT_WINDOWS
 #include <malloc.h> // memalign and _aligned_malloc
@@ -58,19 +76,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #define _aligned_free __mingw_aligned_free
 #endif
 
-#ifdef TORRENT_DEBUG_BUFFERS
-#ifndef TORRENT_WINDOWS
-#include <sys/mman.h>
-#endif
-
-struct alloc_header
-{
-	boost::int64_t size;
-	int magic;
-	char stack[3072];
-};
-
-#endif
+#include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 namespace libtorrent
 {
@@ -97,115 +103,51 @@ namespace libtorrent
 		return s;
 	}
 
-	char* page_aligned_allocator::malloc(page_aligned_allocator::size_type bytes)
+	char* page_allocate(boost::int64_t const bytes)
 	{
 		TORRENT_ASSERT(bytes > 0);
-		// just sanity check (this needs to be pretty high
-		// for cases where the cache size is several gigabytes)
-		TORRENT_ASSERT(bytes < 0x30000000);
-
-		TORRENT_ASSERT(int(bytes) >= page_size());
-#ifdef TORRENT_DEBUG_BUFFERS
-		const int page = page_size();
-		const int num_pages = (bytes + (page-1)) / page + 2;
-		const int orig_bytes = bytes;
-		bytes = num_pages * page;
-#endif
+		TORRENT_ASSERT(bytes >= boost::int64_t(page_size()));
 
 		void* ret;
-#if TORRENT_USE_POSIX_MEMALIGN
-		if (posix_memalign(&ret, page_size(), bytes)
-			!= 0) ret = NULL;
-#elif TORRENT_USE_MEMALIGN
-		ret = memalign(page_size(), bytes);
-#elif defined TORRENT_WINDOWS
-		ret = _aligned_malloc(bytes, page_size());
+#if TORRENT_HAVE_MMAP
+		ret = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, 0, 0);
+		if (ret == map_failed) return NULL;
+#elif TORRENT_USE_VIRTUAL_ALLOC
+		return VirtualAlloc(NULL, bytes, MEM_RESERVE, PAGE_READWRITE);
 #elif defined TORRENT_BEOS
 		area_id id = create_area("", &ret, B_ANY_ADDRESS
 			, (bytes + page_size() - 1) & (page_size()-1), B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
 		if (id < B_OK) return NULL;
+#elif TORRENT_USE_POSIX_MEMALIGN
+		if (posix_memalign(&ret, page_size(), bytes)
+			!= 0) ret = NULL;
+#elif TORRENT_USE_MEMALIGN
+		ret = memalign(page_size(), bytes);
 #else
+		TORRENT_ASSERT(bytes < (std::numeric_limits<size_t>::max)());
 		ret = valloc(size_t(bytes));
 #endif
-		if (ret == NULL) return NULL;
-
-#ifdef TORRENT_DEBUG_BUFFERS
-		// make the two surrounding pages non-readable and -writable
-		alloc_header* h = static_cast<alloc_header*>(ret);
-		h->size = orig_bytes;
-		h->magic = 0x1337;
-		print_backtrace(h->stack, sizeof(h->stack));
-
-#ifdef TORRENT_WINDOWS
-#define mprotect(buf, size, prot) VirtualProtect(buf, size, prot, NULL)
-#define PROT_READ PAGE_READONLY
-#endif
-		mprotect(ret, page, PROT_READ);
-		mprotect(static_cast<char*>(ret) + (num_pages-1) * page, page, PROT_READ);
-
-#ifdef TORRENT_WINDOWS
-#undef mprotect
-#undef PROT_READ
-#endif
-//		fprintf(stderr, "malloc: %p head: %p tail: %p size: %d\n", ret + page, ret, ret + page + bytes, int(bytes));
-
-		return static_cast<char*>(ret) + page;
-#else
 		return static_cast<char*>(ret);
-#endif // TORRENT_DEBUG_BUFFERS
 	}
 
-	void page_aligned_allocator::free(char* block)
+	void page_free(char* block, boost::int64_t size)
 	{
-		if (block == 0) return;
+		if (block == NULL) return;
 
-#ifdef TORRENT_DEBUG_BUFFERS
-
-#ifdef TORRENT_WINDOWS
-#define mprotect(buf, size, prot) VirtualProtect(buf, size, prot, NULL)
-#define PROT_READ PAGE_READONLY
-#define PROT_WRITE PAGE_READWRITE
-#endif
-		const int page = page_size();
-		// make the two surrounding pages non-readable and -writable
-		mprotect(block - page, page, PROT_READ | PROT_WRITE);
-		alloc_header* h = reinterpret_cast<alloc_header*>(block - page);
-		const int num_pages = (h->size + (page-1)) / page + 2;
-		TORRENT_ASSERT(h->magic == 0x1337);
-		mprotect(block + (num_pages-2) * page, page, PROT_READ | PROT_WRITE);
-//		fprintf(stderr, "free: %p head: %p tail: %p size: %d\n", block, block - page, block + h->size, int(h->size));
-		h->magic = 0;
-		block -= page;
-
-#ifdef TORRENT_WINDOWS
-#undef mprotect
-#undef PROT_READ
-#undef PROT_WRITE
-#endif
-
-		print_backtrace(h->stack, sizeof(h->stack));
-
-#endif // TORRENT_DEBUG_BUFFERS
-
-#ifdef TORRENT_WINDOWS
+#if TORRENT_HAVE_MMAP
+		int ret = munmap(block, size);
+		TORRENT_ASSERT(ret == 0);
+#elif TORRENT_USE_VIRTUAL_ALLOC
+		VirtualFree(block, 0, MEM_RELEASE);
+#elif defined TORRENT_WINDOWS
 		_aligned_free(block);
 #elif defined TORRENT_BEOS
 		area_id id = area_for(block);
 		if (id < B_OK) return;
 		delete_area(id);
-#else
+#else // posix_memalign, memalign and valloc all use free()
 		::free(block);
 #endif // TORRENT_WINDOWS
 	}
-
-#ifdef TORRENT_DEBUG_BUFFERS
-	bool page_aligned_allocator::in_use(char const* block)
-	{
-		const int page = page_size();
-		alloc_header const* h = reinterpret_cast<alloc_header const*>(block - page);
-		return h->magic == 0x1337;
-	}
-#endif
-
 }
 
