@@ -110,7 +110,14 @@ namespace libtorrent
 
 		void* ret;
 #if TORRENT_HAVE_MMAP
-		ret = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, 0, 0);
+
+		int flags = MAP_PRIVATE | MAP_ANON;
+#ifdef MAP_NOCORE
+		// BSD has a flag to exclude this region from core files
+		flags |= MAP_NOCORE;
+#endif
+
+		ret = mmap(0, bytes, PROT_READ | PROT_WRITE, flags, 0, 0);
 		if (ret == map_failed) return NULL;
 #elif TORRENT_USE_VIRTUAL_ALLOC
 		return VirtualAlloc(NULL, bytes, MEM_RESERVE, PAGE_READWRITE);
@@ -127,10 +134,18 @@ namespace libtorrent
 		TORRENT_ASSERT(bytes < (std::numeric_limits<size_t>::max)());
 		ret = valloc(size_t(bytes));
 #endif
+
+		// on version of linux that support it, ask for this region to not be
+		// included in coredumps (mostly to make the coredumps more manageable
+		// with large disk caches)
+#if TORRENT_USE_MADVISE && defined MADV_DONTDUMP
+		madvise(ret, bytes, MADV_DONTDUMP);
+#endif
+
 		return static_cast<char*>(ret);
 	}
 
-	void page_free(char* block, boost::int64_t size)
+	void page_free(char* const block, boost::int64_t const size)
 	{
 		if (block == NULL) return;
 
@@ -142,12 +157,24 @@ namespace libtorrent
 #elif defined TORRENT_WINDOWS
 		_aligned_free(block);
 #elif defined TORRENT_BEOS
-		area_id id = area_for(block);
+		area_id const id = area_for(block);
 		if (id < B_OK) return;
 		delete_area(id);
 #else // posix_memalign, memalign and valloc all use free()
 		::free(block);
 #endif // TORRENT_WINDOWS
+	}
+
+	void page_dont_need(char* const block, boost::int64_t const size)
+	{
+
+#if TORRENT_USE_MADVISE && defined MADV_FREE
+		madvise(block, size, MADV_FREE);
+#elif TORRENT_USE_MADVISE && defined TORRENT_LINUX
+		madvise(block, size, MADV_DONTNEED);
+#elif TORRENT_USE_VIRTUAL_ALLOC
+		VirtualFree(block, size, MEM_DECOMMIT);
+#endif
 	}
 }
 

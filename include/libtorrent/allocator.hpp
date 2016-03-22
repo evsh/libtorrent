@@ -43,9 +43,15 @@ namespace libtorrent
 
 	// these allocation functions are meant to be used for large memory
 	// allocations (large means at least megabytes). The memory area that's
-	// allocated is page aligned.
+	// allocated is page aligned. This is primarily meant for allocating the disk
+	// cache, which also means the allocation may be marked no to be included in
+	// coredumps etc.
 	TORRENT_EXTRA_EXPORT char* page_allocate(boost::int64_t bytes);
 	TORRENT_EXTRA_EXPORT void page_free(char* block, boost::int64_t size);
+
+	// indicate we won't be needing the content in this region. Allow the kernle
+	// to recycle the physical memory behind it.
+	TORRENT_EXTRA_EXPORT void page_dont_need(char* block, boost::int64_t size);
 }
 
 #endif
