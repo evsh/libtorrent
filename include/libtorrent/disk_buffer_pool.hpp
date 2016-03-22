@@ -108,10 +108,13 @@ namespace libtorrent
 		// cache size limit
 		int m_max_use;
 
-		// if we have exceeded the limit, we won't start
-		// allowing allocations again until we drop below
-		// this low watermark
+		// if we have exceeded the limit, we won't notify peers of allowing
+		// allocations again until we drop below this low watermark
 		int m_low_watermark;
+
+		// if we exceed this limit, we start telling peers we're full and that
+		// they should wait for notifications of being able to allocate new blocks
+		int m_high_watermark;
 
 		// if we exceed the max number of buffers, we start
 		// adding up callbacks to this queue. Once the number
@@ -143,13 +146,14 @@ namespace libtorrent
 		// the actual size, in bytes, of the memory block at m_cache_pool
 		boost::int64_t m_pool_size;
 
-		// TODO: 4 this should really be a bitfield, and we should scan it from
-		// left to right for empty blocks
+		// TODO: 2 this could probably be optimized by keeping an index to the first
+		// known free block. Every time a block is freed with a lower index, it's
+		// updated. When that block is allocated, the cursor is cleared.
 
-		// list of block indices that are not in use. block_index
-		// times 0x4000 + m_cache_pool is the address where the
-		// corresponding memory lives
-		std::vector<int> m_free_list;
+		// each block in the cache_pool has a corresponding bit in this bitfield.
+		// a set bit means the block is free to be used, a cleared bit means
+		// the block is in use.
+		bitfield m_free_blocks;
 
 		// this is specifically exempt from release_asserts
 		// since it's a quite costly check. Only for debug

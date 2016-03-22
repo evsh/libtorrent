@@ -230,18 +230,17 @@ namespace libtorrent
 			if (ec) return NULL;
 		}
 
-		char* ret;
-		if (m_free_list.size() <= (m_max_use - m_low_watermark)
-			/ 2 && !m_exceeded_max_size)
+		if (m_in_use >= m_high_watermark && !m_exceeded_max_size)
 		{
 			m_exceeded_max_size = true;
 			m_trigger_cache_trim();
 		}
 
-		if (m_free_list.empty()) return NULL;
-		boost::uint64_t const slot_index = m_free_list.back();
-		m_free_list.pop_back();
-		ret = m_cache_pool + (slot_index * m_block_size);
+		int const slot_index = m_free_blocks.find_first_set();
+		if (slot_index < 0) return NULL;
+		m_free_blocks.clear_bit(slot_index);
+
+		char* ret = m_cache_pool + (slot_index * m_block_size);
 		TORRENT_ASSERT(is_disk_buffer(ret, l));
 #if TORRENT_USE_ASSERTS
 		TORRENT_ASSERT(m_buffers_in_use.get_bit(slot_index) == false);
@@ -319,8 +318,15 @@ namespace libtorrent
 		// and the network thread.
 		if (m_max_use < 4) m_max_use = 4;
 
-		m_low_watermark = m_max_use - (std::max)(16, sett.get_int(settings_pack::max_queued_disk_bytes) / m_block_size);
+		int const max_queued_blocks = (std::max)(16
+			, sett.get_int(settings_pack::max_queued_disk_bytes)
+			/ m_block_size);
+
+		m_low_watermark = m_max_use - max_queued_blocks;
 		if (m_low_watermark < 0) m_low_watermark = 0;
+		m_high_watermark = m_max_use - max_queued_blocks / 2;
+		if (m_high_watermark < 0) m_high_watermark = 0;
+
 		if (m_in_use >= m_max_use && !m_exceeded_max_size)
 		{
 			m_exceeded_max_size = true;
@@ -354,8 +360,8 @@ namespace libtorrent
 
 		TORRENT_ASSERT(buf >= m_cache_pool);
 		TORRENT_ASSERT(buf <  m_cache_pool + boost::uint64_t(m_max_use) * m_block_size);
-		int slot_index = (buf - m_cache_pool) / m_block_size;
-		m_free_list.push_back(slot_index);
+		int const slot_index = (buf - m_cache_pool) / m_block_size;
+		m_free_blocks.set_bit(slot_index);
 
 #if TORRENT_USE_ASSERTS
 		TORRENT_ASSERT(m_buffers_in_use.get_bit(slot_index));
@@ -375,10 +381,7 @@ namespace libtorrent
 		// make sure it's page aligned
 		TORRENT_ASSERT((size_t(m_cache_pool) & 0xfff) == 0);
 
-		// TODO: 4 this should be a bitfield
-		m_free_list.reserve(m_max_use);
-		for (int i = m_max_use-1; i >= 0; --i)
-			m_free_list.push_back(i);
+		m_free_blocks.resize(m_max_use, true);
 
 #if TORRENT_USE_ASSERTS
 		m_buffers_in_use.resize(m_max_use);
@@ -392,7 +395,7 @@ namespace libtorrent
 
 		m_cache_pool = NULL;
 		m_pool_size = 0;
-		std::vector<int>().swap(m_free_list);
+		m_free_blocks.clear();
 #if TORRENT_USE_ASSERTS
 		m_buffers_in_use.clear();
 #endif
@@ -415,9 +418,10 @@ namespace libtorrent
 		// on linux (i.e. it won't flush it to disk or re-read from disk)
 		// http://kerneltrap.org/mailarchive/linux-kernel/2007/5/1/84410
 		madvise(buf, m_block_size, MADV_DONTNEED);
+#elif TORRENT_USE_VIRTUAL_ALLOC
+		VirtualAlloc(addr, size, MEM_RESET);
 #endif
 */
-
 	}
 
 }
