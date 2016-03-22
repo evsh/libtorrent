@@ -196,7 +196,7 @@ namespace libtorrent
 				}
 
 				return ret;
-			}	
+			}
 #endif // TORRENT_HAS_SSE
 
 			for (int i = 0; i < words; ++i)
@@ -218,6 +218,114 @@ namespace libtorrent
 			TORRENT_ASSERT(ret <= size());
 			TORRENT_ASSERT(ret >= 0);
 			return ret;
+		}
+
+		int find_first_set() const
+		{
+			const int words = num_words();
+			for (int i = 0; i < words; ++i)
+			{
+				if (m_buf[i] == 0) continue;
+
+				// now, find the index of the first set bit in m_buf[i]
+				uint32_t v = aux::network_to_host(m_buf[i]);
+
+#if TORRENT_HAS_SSE
+				if (aux::mmx_support)
+				{
+#ifdef __GNUC__
+					return i * 32 + __builtin_clz(v);
+#else
+					long int pos;
+					_BitScanReverse(&pos, v);
+					return i * 32 + 31 - pos;
+#endif
+				}
+#endif
+
+				// http://graphics.stanford.edu/~seander/bithacks.html#IntegerLogObvious
+				static const int MultiplyDeBruijnBitPosition[32] =
+				{
+					0, 9, 1, 10, 13, 21, 2, 29, 11, 14, 16, 18, 22, 25, 3, 30,
+					8, 12, 20, 28, 15, 17, 24, 7, 19, 27, 23, 6, 26, 5, 4, 31
+				};
+
+				v |= v >> 1; // first round down to one less than a power of 2
+				v |= v >> 2;
+				v |= v >> 4;
+				v |= v >> 8;
+				v |= v >> 16;
+
+				return i * 32 + MultiplyDeBruijnBitPosition[static_cast<uint32_t>(v * 0x07C4ACDDU) >> 27];
+			}
+			return -1;
+		}
+
+		int find_last_clear()
+		{
+			const int words = num_words();
+
+			uint32_t const mask = 0xffffffff << (32 - (size() & 31));
+			uint32_t last = aux::network_to_host(m_buf[words - 1]);
+
+			// turn it into a problem of finding the last _set_ bit instead
+			last ^= mask;
+
+			// if no bit is _set_ in this word, keep scanning full words in the
+			// loop below
+			if (last != 0)
+			{
+				int const i = words - 1;
+#if TORRENT_HAS_SSE
+				if (aux::mmx_support)
+				{
+#ifdef __GNUC__
+					return i * 32 + 31 - __builtin_ctz(last);
+#else
+					long int pos;
+					_BitScanForward(&pos, last);
+					return i * 32 + 31 - pos;
+#endif
+				}
+#endif
+
+				for (int k = 0; k < 32; ++k, last >>= 1)
+				{
+					if ((last & 1) == 1) continue;
+					return i * 32 + 31 - k;
+				}
+				TORRENT_ASSERT(false && "how is this possible?");
+				return -1;
+			}
+
+			for (int i = words - 2; i >= 0; --i)
+			{
+				if (m_buf[i] == 0xffffffff) continue;
+
+				// now, find the index of the last clear bit in m_buf[i]
+				// to take advantage of special instructions, negate the word
+				uint32_t v = ~aux::network_to_host(m_buf[i]);
+
+#if TORRENT_HAS_SSE
+				if (aux::mmx_support)
+				{
+#ifdef __GNUC__
+					return i * 32 + 31 - __builtin_ctz(v);
+#else
+					long int pos;
+					_BitScanForward(&pos, v);
+					return i * 32 + 31 - pos;
+#endif
+				}
+#endif
+
+				for (int k = 0; k < 32; ++k, v >>= 1)
+				{
+					if ((v & 1) == 1) continue;
+					return i * 32 + 31 - k;
+				}
+			}
+			return -1;
 		}
 
 		struct const_iterator

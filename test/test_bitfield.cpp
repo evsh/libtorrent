@@ -188,3 +188,56 @@ TORRENT_TEST(bitfield)
 		TEST_EQUAL(test1.all_set(), true);
 	}
 }
+
+TORRENT_TEST(find_first_set_small)
+{
+	bitfield test1(10, false);
+	TEST_EQUAL(test1.find_first_set(), -1);
+}
+
+TORRENT_TEST(find_first_set_large)
+{
+	bitfield test1(100, false);
+	TEST_EQUAL(test1.find_first_set(), -1);
+}
+
+TORRENT_TEST(find_first_set_early)
+{
+	bitfield test1(100, false);
+	test1.set_bit(4);
+	TEST_EQUAL(test1.find_first_set(), 4);
+}
+
+TORRENT_TEST(find_first_set_late)
+{
+	bitfield test1(100, false);
+	test1.set_bit(98);
+	TEST_EQUAL(test1.find_first_set(), 98);
+}
+
+TORRENT_TEST(find_last_clear_small)
+{
+	bitfield test1(10, true);
+	TEST_EQUAL(test1.find_last_clear(), -1);
+}
+
+TORRENT_TEST(find_last_clear_large)
+{
+	bitfield test1(100, true);
+	TEST_EQUAL(test1.find_last_clear(), -1);
+}
+
+TORRENT_TEST(find_last_clear_early)
+{
+	bitfield test1(100, true);
+	test1.clear_bit(4);
+	TEST_EQUAL(test1.find_last_clear(), 4);
+}
+
+TORRENT_TEST(find_last_clear_late)
+{
+	bitfield test1(100, true);
+	test1.clear_bit(98);
+	TEST_EQUAL(test1.find_last_clear(), 98);
+}
+
