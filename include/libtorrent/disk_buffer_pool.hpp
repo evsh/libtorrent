@@ -106,7 +106,7 @@ namespace libtorrent
 		int m_in_use;
 
 		// cache size limit
-		int m_max_use;
+		int m_max_size;
 
 		// if we have exceeded the limit, we won't notify peers of allowing
 		// allocations again until we drop below this low watermark

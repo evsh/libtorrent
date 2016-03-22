@@ -75,8 +75,8 @@ namespace libtorrent
 		, boost::function<void()> const& trigger_trim)
 		: m_block_size(block_size)
 		, m_in_use(0)
-		, m_max_use(64)
-		, m_low_watermark((std::max)(m_max_use - 32, 0))
+		, m_max_size(64)
+		, m_low_watermark((std::max)(m_max_size - 32, 0))
 		, m_trigger_cache_trim(trigger_trim)
 		, m_exceeded_max_size(false)
 		, m_ios(ios)
@@ -106,10 +106,10 @@ namespace libtorrent
 		mutex::scoped_lock l(m_pool_mutex);
 
 		if (m_exceeded_max_size)
-			ret = m_in_use - (std::min)(m_low_watermark, int(m_max_use - m_observers.size()*2));
+			ret = m_in_use - (std::min)(m_low_watermark, int(m_max_size - m_observers.size()*2));
 
-		if (m_in_use + num_needed > m_max_use)
-			ret = (std::max)(ret, int(m_in_use + num_needed - m_max_use));
+		if (m_in_use + num_needed > m_max_size)
+			ret = (std::max)(ret, int(m_in_use + num_needed - m_max_size));
 
 		if (ret < 0) ret = 0;
 		else if (ret > m_in_use) ret = m_in_use;
@@ -146,7 +146,7 @@ namespace libtorrent
 		if (m_cache_pool)
 		{
 			return buffer >= m_cache_pool && buffer < m_cache_pool
-				+ boost::uint64_t(m_max_use) * m_block_size;
+				+ boost::uint64_t(m_max_size) * m_block_size;
 		}
 		return false;
 	}
@@ -294,13 +294,13 @@ namespace libtorrent
 		{
 			boost::uint64_t phys_ram = total_physical_ram();
 			boost::int64_t const gb = 1024 * 1024 * 1024;
-			if (phys_ram <= gb) m_max_use = 256;
-			else if (phys_ram <= 4 * gb) m_max_use = 1024;
-			else m_max_use = 4096;
+			if (phys_ram <= gb) m_max_size = 256;
+			else if (phys_ram <= 4 * gb) m_max_size = 1024;
+			else m_max_size = 4096;
 		}
 		else
 		{
-			m_max_use = cache_size;
+			m_max_size = cache_size;
 		}
 
 		// 32 bit builds should capped below 2 GB of memory, even
@@ -308,26 +308,26 @@ namespace libtorrent
 		// constrained by the 32 bit virtual address space.
 		if (sizeof(void*) == 4)
 		{
-			m_max_use = (std::min)(2 * 1024 * 1024 * 3 / 4 * 1024
-				/ m_block_size, m_max_use);
+			m_max_size = (std::min)(2 * 1024 * 1024 * 3 / 4 * 1024
+				/ m_block_size, m_max_size);
 		}
 
 		// we need some space to store buffers in. If the cache size would be
 		// literally zero, no operation could ever complete, as both reading and
 		// writing requires buffers to transfer data between the disk I/O threads
 		// and the network thread.
-		if (m_max_use < 4) m_max_use = 4;
+		if (m_max_size < 4) m_max_size = 4;
 
 		int const max_queued_blocks = (std::max)(16
 			, sett.get_int(settings_pack::max_queued_disk_bytes)
 			/ m_block_size);
 
-		m_low_watermark = m_max_use - max_queued_blocks;
+		m_low_watermark = m_max_size - max_queued_blocks;
 		if (m_low_watermark < 0) m_low_watermark = 0;
-		m_high_watermark = m_max_use - max_queued_blocks / 2;
+		m_high_watermark = m_max_size - max_queued_blocks / 2;
 		if (m_high_watermark < 0) m_high_watermark = 0;
 
-		if (m_in_use >= m_max_use && !m_exceeded_max_size)
+		if (m_in_use >= m_max_size && !m_exceeded_max_size)
 		{
 			m_exceeded_max_size = true;
 			m_trigger_cache_trim();
@@ -337,7 +337,7 @@ namespace libtorrent
 		m_settings_set = true;
 #endif
 
-		if (m_cache_pool && m_pool_size != m_max_use * m_block_size)
+		if (m_cache_pool && m_pool_size != m_max_size * m_block_size)
 		{
 			TORRENT_ASSERT(m_in_use == 0);
 			free_pool();
@@ -359,7 +359,7 @@ namespace libtorrent
 		TORRENT_UNUSED(l);
 
 		TORRENT_ASSERT(buf >= m_cache_pool);
-		TORRENT_ASSERT(buf <  m_cache_pool + boost::uint64_t(m_max_use) * m_block_size);
+		TORRENT_ASSERT(buf <  m_cache_pool + boost::uint64_t(m_max_size) * m_block_size);
 		int const slot_index = (buf - m_cache_pool) / m_block_size;
 		m_free_blocks.set_bit(slot_index);
 
@@ -375,16 +375,16 @@ namespace libtorrent
 	{
 		if (m_cache_pool != NULL) return;
 
-		m_pool_size = boost::uint64_t(m_max_use) * m_block_size;
+		m_pool_size = boost::uint64_t(m_max_size) * m_block_size;
 		m_cache_pool = page_allocate(m_pool_size);
 
 		// make sure it's page aligned
 		TORRENT_ASSERT((size_t(m_cache_pool) & 0xfff) == 0);
 
-		m_free_blocks.resize(m_max_use, true);
+		m_free_blocks.resize(m_max_size, true);
 
 #if TORRENT_USE_ASSERTS
-		m_buffers_in_use.resize(m_max_use);
+		m_buffers_in_use.resize(m_max_size);
 		m_buffers_in_use.clear_all();
 #endif
 	}
