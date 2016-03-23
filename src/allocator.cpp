@@ -154,6 +154,7 @@ namespace libtorrent
 #if TORRENT_HAVE_MMAP
 		int ret = munmap(block, size);
 		TORRENT_ASSERT(ret == 0);
+		TORRENT_UNUSED(ret);
 #elif TORRENT_USE_VIRTUAL_ALLOC
 		VirtualFree(block, 0, MEM_RELEASE);
 #elif defined TORRENT_WINDOWS

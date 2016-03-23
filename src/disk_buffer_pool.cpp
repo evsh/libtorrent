@@ -376,7 +376,7 @@ namespace libtorrent
 		--m_in_use;
 	}
 
-	void disk_buffer_pool::allocate_pool(error_code& ec)
+	void disk_buffer_pool::allocate_pool(error_code&)
 	{
 		if (m_cache_pool != NULL) return;
 
