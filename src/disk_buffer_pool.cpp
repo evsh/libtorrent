@@ -77,6 +77,8 @@ namespace libtorrent
 		, m_in_use(0)
 		, m_max_size(64)
 		, m_low_watermark((std::max)(m_max_size - 32, 0))
+		, m_high_watermark((std::max)(m_max_size - 16, 0))
+		, m_highest_allocated(0)
 		, m_trigger_cache_trim(trigger_trim)
 		, m_exceeded_max_size(false)
 		, m_ios(ios)
@@ -240,6 +242,9 @@ namespace libtorrent
 		if (slot_index < 0) return NULL;
 		m_free_blocks.clear_bit(slot_index);
 
+		if (slot_index > m_highest_allocated)
+			m_highest_allocated = slot_index;
+
 		char* ret = m_cache_pool + (slot_index * m_block_size);
 		TORRENT_ASSERT(is_disk_buffer(ret, l));
 #if TORRENT_USE_ASSERTS
@@ -318,7 +323,7 @@ namespace libtorrent
 		// and the network thread.
 		if (m_max_size < 4) m_max_size = 4;
 
-		int const max_queued_blocks = (std::max)(16
+		int const max_queued_blocks = (std::max)(1
 			, sett.get_int(settings_pack::max_queued_disk_bytes)
 			/ m_block_size);
 
@@ -395,6 +400,7 @@ namespace libtorrent
 
 		m_cache_pool = NULL;
 		m_pool_size = 0;
+		m_highest_allocated = 0;
 		m_free_blocks.clear();
 #if TORRENT_USE_ASSERTS
 		m_buffers_in_use.clear();
@@ -406,22 +412,22 @@ namespace libtorrent
 	void disk_buffer_pool::release_memory()
 	{
 		TORRENT_ASSERT(m_magic == 0x1337);
-/*
-#if defined MADV_FREE
-		// tell the virtual memory system that we don't actually care
-		// about the data in these pages anymore. If this block was
-		// swapped out to the SSD, it (hopefully) means it won't have
-		// to be read back in once we start writing our new data to it
-		madvise(buf, m_block_size, MADV_FREE);
-#elif defined MADV_DONTNEED && defined TORRENT_LINUX
-		// rumor has it that MADV_DONTNEED is in fact destructive
-		// on linux (i.e. it won't flush it to disk or re-read from disk)
-		// http://kerneltrap.org/mailarchive/linux-kernel/2007/5/1/84410
-		madvise(buf, m_block_size, MADV_DONTNEED);
-#elif TORRENT_USE_VIRTUAL_ALLOC
-		VirtualAlloc(addr, size, MEM_RESET);
-#endif
-*/
+		TORRENT_ASSERT(m_highest_allocated < m_max_size);
+
+		if (m_cache_pool == NULL) return;
+
+		// we want a conservative estimate of the amount of memory the cache uses,
+		// so instead of looking at the currently highest allocated block, look at
+		// the highest since the last call to release_memory()
+
+		if (m_highest_allocated == m_max_size - 1) return;
+
+		page_dont_need(m_cache_pool + m_highest_allocated * m_block_size
+			, (m_max_size - m_highest_allocated) * m_block_size);
+
+		m_highest_allocated = m_free_blocks.find_last_clear();
+
+		TORRENT_ASSERT(m_highest_allocated < m_max_size);
 	}
 
 }

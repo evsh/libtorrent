@@ -548,7 +548,10 @@ void block_cache::try_evict_one_volatile()
 {
 	INVARIANT_CHECK;
 
-	DLOG(stderr, "[%p] try_evict_one_volatile\n", static_cast<void*>(this));
+	DLOG(stderr, "[%p] try_evict_one_volatile [ size: %d limit: %d]\n"
+		, static_cast<void*>(this)
+		, m_volatile_size
+		, m_max_volatile_blocks);
 
 	if (m_volatile_size < m_max_volatile_blocks) return;
 

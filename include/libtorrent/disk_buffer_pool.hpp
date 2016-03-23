@@ -116,6 +116,10 @@ namespace libtorrent
 		// they should wait for notifications of being able to allocate new blocks
 		int m_high_watermark;
 
+		// this is the highest indexed allocated block. Every now and then this is
+		// recalculated by scanning m_free_blocks
+		int m_highest_allocated;
+
 		// if we exceed the max number of buffers, we start
 		// adding up callbacks to this queue. Once the number
 		// of buffers in use drops below the low watermark,
