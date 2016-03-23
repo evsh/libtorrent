@@ -122,7 +122,7 @@ namespace libtorrent
 		ret = mmap(0, bytes, PROT_READ | PROT_WRITE, flags, 0, 0);
 		if (ret == map_failed) return NULL;
 #elif TORRENT_USE_VIRTUAL_ALLOC
-		return VirtualAlloc(NULL, bytes, MEM_RESERVE, PAGE_READWRITE);
+		return static_cast<void*>(VirtualAlloc(NULL, bytes, MEM_RESERVE, PAGE_READWRITE));
 #elif defined TORRENT_BEOS
 		area_id id = create_area("", &ret, B_ANY_ADDRESS
 			, (bytes + page_size() - 1) & (page_size()-1), B_NO_LOCK, B_READ_AREA | B_WRITE_AREA);
