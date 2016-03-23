@@ -128,7 +128,7 @@ std::string const& progress_bar(int progress, int width, color_code c
 	return bar;
 }
 
-bool get_piece(libtorrent::bitfield const& p, int index)
+int get_piece(libtorrent::bitfield const& p, int index)
 {
 	if (index < 0 || index >= p.size()) return false;
 	return p.get_bit(index);

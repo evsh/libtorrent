@@ -58,7 +58,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <linux/unistd.h>
 #endif
 
+#if TORRENT_HAVE_MMAP
 static void* const map_failed = MAP_FAILED;
+#endif
 
 
 #if TORRENT_USE_MEMALIGN || TORRENT_USE_POSIX_MEMALIGN || defined TORRENT_WINDOWS
