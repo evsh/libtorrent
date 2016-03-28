@@ -42,6 +42,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
 #include "libtorrent/proxy_base.hpp"
+#include "libtorrent/broadcast_socket.hpp" // for is_ip_address
 #include "libtorrent/assert.hpp"
 #if defined TORRENT_ASIO_DEBUGGING
 #include "libtorrent/debug.hpp"
@@ -143,17 +144,10 @@ public:
 
 	void set_dst_name(std::string const& host)
 	{
-		// TODO: 3 re-enable this assert and fix callers
-/*
-#if TORRENT_USE_ASSERTS
-		error_code ec;
-		address::from_string(host, ec);
 		// if this assert trips, set_dst_name() is called wth an IP address rather
 		// than a hostname. Instead, resolve the IP into an address and pass it to
 		// async_connect instead
-		TORRENT_ASSERT(ec);
-#endif
-*/
+		TORRENT_ASSERT(!is_ip_address(host.c_str()));
 		m_dst_name = host;
 		if (m_dst_name.size() > 255)
 			m_dst_name.resize(255);
