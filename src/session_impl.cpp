@@ -2274,7 +2274,7 @@ retry:
 
 		if (m_socks_listen_socket) return;
 
-		m_socks_listen_socket = boost::make_shared<socket_type>(m_io_service);
+		m_socks_listen_socket = boost::make_shared<socket_type>(boost::ref(m_io_service));
 		bool const ret = instantiate_connection(m_io_service, proxy()
 			, *m_socks_listen_socket, NULL, NULL, false, false);
 		TORRENT_ASSERT_VAL(ret, ret);
