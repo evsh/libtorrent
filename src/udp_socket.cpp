@@ -802,6 +802,8 @@ void udp_socket::bind(udp::endpoint const& ep, error_code& ec)
 #if TORRENT_USE_ASSERTS
 	m_started = true;
 #endif
+
+	error_code err;
 	udp::endpoint const lep = m_ipv4_sock.local_endpoint(ec);
 	m_bind_port = lep.port();
 }
