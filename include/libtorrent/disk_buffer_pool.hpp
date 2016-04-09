@@ -150,10 +150,6 @@ namespace libtorrent
 		// the actual size, in bytes, of the memory block at m_cache_pool
 		boost::int64_t m_pool_size;
 
-		// TODO: 2 this could probably be optimized by keeping an index to the first
-		// known free block. Every time a block is freed with a lower index, it's
-		// updated. When that block is allocated, the cursor is cleared.
-
 		// each block in the cache_pool has a corresponding bit in this bitfield.
 		// a set bit means the block is free to be used, a cleared bit means
 		// the block is in use.

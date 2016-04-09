@@ -238,6 +238,9 @@ namespace libtorrent
 			m_trigger_cache_trim();
 		}
 
+		// TODO: 2 this could probably be optimized by keeping an index to the first
+		// known free block. Every time a block is freed with a lower index, it's
+		// updated. When that block is allocated, the cursor is cleared.
 		int const slot_index = m_free_blocks.find_first_set();
 		if (slot_index < 0) return NULL;
 		m_free_blocks.clear_bit(slot_index);
@@ -366,6 +369,7 @@ namespace libtorrent
 		TORRENT_ASSERT(buf >= m_cache_pool);
 		TORRENT_ASSERT(buf <  m_cache_pool + boost::uint64_t(m_max_size) * m_block_size);
 		int const slot_index = (buf - m_cache_pool) / m_block_size;
+		TORRENT_ASSERT(m_free_blocks.get_bit(slot_index) == false);
 		m_free_blocks.set_bit(slot_index);
 
 #if TORRENT_USE_ASSERTS
