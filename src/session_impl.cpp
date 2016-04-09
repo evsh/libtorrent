@@ -2881,11 +2881,21 @@ namespace aux {
 		if (m_abort)
 		{
 			if (m_utp_socket_manager.num_sockets() == 0
+#ifdef TORRENT_USE_OPENSSL
+				&& m_ssl_utp_socket_manager.num_sockets() == 0
+#endif
 				&& m_undead_peers.empty())
+			{
 				return;
+			}
 #if defined TORRENT_ASIO_DEBUGGING
-			fprintf(stderr, "uTP sockets left: %d undead-peers left: %d\n"
+			fprintf(stderr, "uTP sockets: %d ssl-uTP sockets: %d undead-peers left: %d\n"
 				, m_utp_socket_manager.num_sockets()
+#ifdef TORRENT_USE_OPENSSL
+				, m_ssl_utp_socket_manager.num_sockets()
+#else
+				, 0
+#endif
 				, int(m_undead_peers.size()));
 #endif
 		}

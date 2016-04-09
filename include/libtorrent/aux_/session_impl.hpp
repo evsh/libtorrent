@@ -1048,12 +1048,10 @@ namespace libtorrent
 			// m_listen_sockets
 			int m_external_udp_port;
 
-//			udp_socket m_udp_socket;
 			libtorrent::utp_socket_manager m_utp_socket_manager;
 
 #ifdef TORRENT_USE_OPENSSL
 			// used for uTP connectons over SSL
-//			udp_socket m_ssl_udp_socket;
 			libtorrent::utp_socket_manager m_ssl_utp_socket_manager;
 #endif
 
