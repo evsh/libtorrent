@@ -415,6 +415,7 @@ namespace aux {
 #endif
 		// TODO: 4 introduce an adapter layer between the udp socket(s) and the
 		// utp socket manager
+		, m_udp_socket(m_io_service)
 		, m_utp_socket_manager(m_settings, m_udp_socket, m_stats_counters, NULL
 			, boost::bind(&session_impl::incoming_connection, this, _1))
 #ifdef TORRENT_USE_OPENSSL
@@ -444,14 +445,19 @@ namespace aux {
 		m_posting_torrent_updates = false;
 #endif
 
-		m_udp_socket.subscribe(&m_utp_socket_manager);
-		m_udp_socket.subscribe(this);
-		m_udp_socket.subscribe(&m_tracker_manager);
-
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			if (!i->udp_sock) continue;
 #ifdef TORRENT_USE_OPENSSL
-		m_ssl_udp_socket.subscribe(&m_ssl_utp_socket_manager);
-		m_ssl_udp_socket.subscribe(this);
+			if (i->ssl)
+				i->udp_sock->subscribe(&m_ssl_utp_socket_manager);
+			else
 #endif
+				i->udp_sock->subscribe(&m_utp_socket_manager);
+			i->udp_sock->subscribe(this);
+			i->udp_sock->subscribe(&m_tracker_manager);
+		}
 
 		error_code ec;
 		TORRENT_ASSERT_VAL(!ec, ec);
@@ -1048,7 +1054,6 @@ namespace aux {
 			// the uTP connections cannot be closed gracefully
 			i->udp_sock->close();
 		}
-		m_listen_sockets.clear();
 		if (m_socks_listen_socket && m_socks_listen_socket->is_open())
 		{
 			m_socks_listen_socket->close(ec);
@@ -1854,23 +1859,29 @@ namespace aux {
 
 		ret.udp_sock.reset(new udp_socket(m_io_service));
 #if TORRENT_HAS_BINDTODEVICE
-		ret.udp_sock->set_option(bind_to_device(device.c_str()), ec);
-		if (ec)
+		if (!device.empty())
 		{
+			ret.udp_sock->set_option(bind_to_device(device.c_str()), ec);
+			if (ec)
+			{
 #ifndef TORRENT_DISABLE_LOGGING
-			session_log("bind to device failed (device: %s): %s"
-				, device.c_str(), ec.message().c_str());
+				session_log("bind to device failed (device: %s): %s"
+					, device.c_str(), ec.message().c_str());
 #endif // TORRENT_DISABLE_LOGGING
 
-			last_op = listen_failed_alert::bind_to_device;
-			if (m_alerts.should_post<listen_failed_alert>())
-			{
-				m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
-					, last_op, ec, sock_type);
+				last_op = listen_failed_alert::bind_to_device;
+				if (m_alerts.should_post<listen_failed_alert>())
+				{
+					m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
+						, last_op, ec, sock_type);
+				}
+				return ret;
 			}
-			return ret;
 		}
 #endif
+		ret.udp_sock->bind(udp::endpoint(bind_ep.address(), bind_ep.port())
+			, ec);
+
 		last_op = listen_failed_alert::bind;
 		if (ec)
 		{
@@ -1879,14 +1890,14 @@ namespace aux {
 				, device.c_str(), ec.message().c_str());
 #endif
 
-			listen_failed_alert::socket_type_t const sock_type
+			listen_failed_alert::socket_type_t const udp_sock_type
 				= (flags & open_ssl_socket)
 				? listen_failed_alert::utp_ssl
 				: listen_failed_alert::udp;
 
 			if (m_alerts.should_post<listen_failed_alert>())
 				m_alerts.emplace_alert<listen_failed_alert>(device
-					, last_op, ec, sock_type);
+					, bind_ep, last_op, ec, udp_sock_type);
 
 			return ret;
 		}
@@ -1931,9 +1942,12 @@ namespace aux {
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			i->sock->close(ec);
+			if (i->sock) i->sock->close(ec);
+			if (i->udp_sock) i->udp_sock->close();
 		}
 
+#error the async_read operations won't have come back here (clearly). Deleting \
+		the udp socket(s) here will assert
 		m_listen_sockets.clear();
 		m_stats_counters.set_value(counters::has_incoming_connections, 0);
 		ec.clear();
@@ -2021,7 +2035,7 @@ namespace aux {
 				, end(m_listen_sockets.end()); i != end; ++i)
 			{
 				error_code err;
-				tcp::endpoint bind_ep = i->sock->local_endpoint(err);
+				tcp::endpoint const tcp_ep = i->sock->local_endpoint(err);
 				if (!err)
 				{
 					listen_succeeded_alert::socket_type_t const socket_type
@@ -2030,10 +2044,10 @@ namespace aux {
 						: listen_succeeded_alert::tcp;
 
 					m_alerts.emplace_alert<listen_succeeded_alert>(
-						bind_ep , socket_type);
+						tcp_ep , socket_type);
 				}
 
-				bind_ep = i->udp_sock->local_endpoint(err);
+				udp::endpoint const udp_ep = i->udp_sock->local_endpoint(err);
 				if (!err && i->udp_sock->is_open())
 				{
 					listen_succeeded_alert::socket_type_t const socket_type
@@ -2042,7 +2056,7 @@ namespace aux {
 						: listen_succeeded_alert::udp;
 
 					m_alerts.emplace_alert<listen_succeeded_alert>(
-						bind_ep, socket_type);
+						tcp::endpoint(udp_ep.address(), udp_ep.port()), socket_type);
 				}
 			}
 		}
@@ -2059,7 +2073,7 @@ namespace aux {
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
 			async_accept(i->sock, i->ssl);
-			remap_ports(natpmp_and_upnp, *i);
+			remap_ports(remap_natpmp_and_upnp, *i);
 		}
 
 		open_new_incoming_socks_connection();
@@ -2069,8 +2083,8 @@ namespace aux {
 	}
 
 	namespace {
-		template <typename MapProtocol>
-		void map_port(MapProtocol& m, int protocol, tcp::endpoint const& ep
+		template <typename MapProtocol, typename ProtoType, typename EndpointType>
+		void map_port(MapProtocol& m, ProtoType protocol, EndpointType const& ep
 			, int& map_handle)
 		{
 			if (map_handle != -1) m.delete_mapping(map_handle);
@@ -2087,14 +2101,14 @@ namespace aux {
 	{
 		error_code ec;
 		tcp::endpoint const tcp_ep = s.sock ? s.sock->local_endpoint(ec) : tcp::endpoint(); 
-		tcp::endpoint const udp_ep = s.udp_sock ? s.udp_sock->local_endpoint(ec) : tcp::endpoint();
+		udp::endpoint const udp_ep = s.udp_sock ? s.udp_sock->local_endpoint(ec) : udp::endpoint();
 
-		if ((mask & natpmp) && m_natpmp)
+		if ((mask & remap_natpmp) && m_natpmp)
 		{
 			map_port(*m_natpmp, natpmp::tcp, tcp_ep, s.tcp_port_mapping[0]);
 			map_port(*m_natpmp, natpmp::udp, udp_ep, s.udp_port_mapping[0]);
 		}
-		if ((mask & upnp) && m_upnp)
+		if ((mask & remap_upnp) && m_upnp)
 		{
 			map_port(*m_upnp, upnp::tcp, tcp_ep, s.tcp_port_mapping[1]);
 			map_port(*m_upnp, upnp::udp, udp_ep, s.udp_port_mapping[1]);
@@ -5338,7 +5352,7 @@ namespace aux {
 		if (ls == m_listen_sockets.end())
 		{
 			ls = std::find_if(m_listen_sockets.begin(), m_listen_sockets.end()
-				, boost::bind(find_tcp_port_mapping, map_transport, mapping, _1));
+				, boost::bind(find_udp_port_mapping, map_transport, mapping, _1));
 			tcp = false;
 		}
 
@@ -5535,13 +5549,23 @@ namespace aux {
 
 		m_dht->start(startup_state, boost::bind(&on_bootstrap, boost::ref(m_alerts)));
 
-		m_udp_socket.subscribe(m_dht.get());
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			if (!i->udp_sock) continue;
+			i->udp_sock->subscribe(m_dht.get());
+		}
 	}
 
 	void session_impl::stop_dht()
 	{
 		if (!m_dht) return;
-		m_udp_socket.unsubscribe(m_dht.get());
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			if (!i->udp_sock) continue;
+			i->udp_sock->unsubscribe(m_dht.get());
+		}
 		m_dht->stop();
 		m_dht.reset();
 	}
@@ -5828,14 +5852,19 @@ namespace aux {
 		// this is not allowed to be the network thread!
 //		TORRENT_ASSERT(is_not_thread());
 
-		m_udp_socket.unsubscribe(this);
-		m_udp_socket.unsubscribe(&m_utp_socket_manager);
-		m_udp_socket.unsubscribe(&m_tracker_manager);
-
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			if (!i->udp_sock) continue;
+			i->udp_sock->unsubscribe(this);
 #ifdef TORRENT_USE_OPENSSL
-		m_ssl_udp_socket.unsubscribe(this);
-		m_ssl_udp_socket.unsubscribe(&m_ssl_utp_socket_manager);
+			if (i->ssl)
+				m_ssl_udp_socket.unsubscribe(&m_ssl_utp_socket_manager);
+			else
 #endif
+				i->udp_sock->unsubscribe(&m_utp_socket_manager);
+			i->udp_sock->unsubscribe(&m_tracker_manager);
+		}
 
 		TORRENT_ASSERT(m_torrents.empty());
 		TORRENT_ASSERT(m_connections.empty());
@@ -5981,19 +6010,21 @@ namespace aux {
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
 			error_code ec;
-			set_tos(i->sock, tos, ec);
+			set_tos(*i->sock, tos, ec);
 
 #ifndef TORRENT_DISABLE_LOGGING
+			error_code err;
 			session_log(">>> SET_TOS [ tcp (%s %d) tos: %x e: %s ]"
-				, i->sock->local_endpoint().address().to_string().c_str()
-				, i->sock->local_endpoint().port(), tos, ec.message().c_str());
+				, i->sock->local_endpoint(err).address().to_string().c_str()
+				, i->sock->local_endpoint(err).port(), tos, ec.message().c_str());
 #endif
 			ec.clear();
-			set_tos(i->udp_sock, tos, ec);
+			set_tos(*i->udp_sock, tos, ec);
 
 #ifndef TORRENT_DISABLE_LOGGING
 			session_log(">>> SET_TOS [ udp (%s %d) tos: %x e: %s ]"
-				, i->udp_sock->local_address().to_string().c_str(), i->udp_sock->local_port()
+				, i->udp_sock->local_endpoint(err).address().to_string().c_str()
+				, i->udp_sock->local_port()
 				, tos, ec.message().c_str());
 #endif
 		}
@@ -6187,7 +6218,7 @@ namespace aux {
 				error_code err;
 				session_log("socket buffer size [ udp %s %d]: (%d) %s"
 				, i->udp_sock->local_endpoint(err).address().to_string(err).c_str()
-				, i->udp_sock->local_port(), ec.value(), ec.message());
+				, i->udp_sock->local_port(), ec.value(), ec.message().c_str());
 			}
 #endif
 			ec.clear();
@@ -6198,7 +6229,7 @@ namespace aux {
 				error_code err;
 				session_log("socket buffer size [ udp %s %d]: (%d) %s"
 				, i->sock->local_endpoint(err).address().to_string(err).c_str()
-				, i->sock->local_endpoint(err).port(), ec.value(), ec.message());
+				, i->sock->local_endpoint(err).port(), ec.value(), ec.message().c_str());
 			}
 #endif
 		}
@@ -6528,7 +6559,7 @@ namespace aux {
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			remap_ports(natpmp, *i);
+			remap_ports(remap_natpmp, *i);
 		}
 		return m_natpmp.get();
 	}
@@ -6554,7 +6585,7 @@ namespace aux {
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			remap_ports(upnp, *i);
+			remap_ports(remap_upnp, *i);
 		}
 		return m_upnp.get();
 	}

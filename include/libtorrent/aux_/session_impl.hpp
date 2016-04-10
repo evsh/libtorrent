@@ -1055,6 +1055,9 @@ namespace libtorrent
 			bool incoming_packet(error_code const& ec
 				, udp::endpoint const&, char const* buf, int size) TORRENT_OVERRIDE;
 
+#error remove this
+			udp_socket m_udp_socket;
+
 			libtorrent::utp_socket_manager m_utp_socket_manager;
 
 #ifdef TORRENT_USE_OPENSSL
@@ -1077,9 +1080,9 @@ namespace libtorrent
 			// TODO: 3 perhaps this function should move into listen_socket_t
 			enum remap_port_mask_t
 			{
-				natpmp = 1,
-				upnp = 2,
-				natpmp_and_upnp = 3
+				remap_natpmp = 1,
+				remap_upnp = 2,
+				remap_natpmp_and_upnp = 3
 			};
 			void remap_ports(remap_port_mask_t mask, listen_socket_t& s);
 

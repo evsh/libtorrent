@@ -99,11 +99,8 @@ namespace libtorrent
 		void set_force_proxy(bool f) { m_force_proxy = f; }
 
 		bool is_closed() const { return m_abort; }
-		tcp::endpoint local_endpoint(error_code& ec) const
-		{
-			udp::endpoint ep = m_socket.local_endpoint(ec);
-			return tcp::endpoint(ep.address(), ep.port());
-		}
+		udp::endpoint local_endpoint(error_code& ec) const
+		{ return m_socket.local_endpoint(ec); }
 
 		void set_buf_size(int s);
 

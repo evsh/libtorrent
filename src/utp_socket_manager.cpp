@@ -184,7 +184,8 @@ namespace libtorrent
 
 	tcp::endpoint utp_socket_manager::local_endpoint(address const& remote, error_code& ec) const
 	{
-		tcp::endpoint socket_ep = m_sock.local_endpoint(ec);
+		udp::endpoint const udp_ep = m_sock.local_endpoint(ec);
+		tcp::endpoint const socket_ep(udp_ep.address(), udp_ep.port());
 
 		// first enumerate the routes in the routing table
 		if (aux::time_now() - seconds(60) > m_last_route_update)
