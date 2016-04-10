@@ -238,6 +238,8 @@ namespace libtorrent
 		char m_tmp_buf[270];
 		bool m_queue_packets;
 		bool m_tunnel_packets;
+
+		// TODO: 3 add a unit test for force-proxy
 		bool m_force_proxy;
 		bool m_abort;
 

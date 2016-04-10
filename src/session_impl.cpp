@@ -413,14 +413,11 @@ namespace aux {
 		, m_dht_interval_update_torrents(0)
 		, m_outstanding_router_lookups(0)
 #endif
-		, m_external_udp_port(0)
-		, m_udp_socket(m_io_service)
 		// TODO: 4 introduce an adapter layer between the udp socket(s) and the
 		// utp socket manager
 		, m_utp_socket_manager(m_settings, m_udp_socket, m_stats_counters, NULL
 			, boost::bind(&session_impl::incoming_connection, this, _1))
 #ifdef TORRENT_USE_OPENSSL
-		, m_ssl_udp_socket(m_io_service)
 		, m_ssl_utp_socket_manager(m_settings, m_ssl_udp_socket, m_stats_counters
 			, &m_ssl_ctx
 			, boost::bind(&session_impl::on_incoming_utp_ssl, this, _1))
@@ -1665,91 +1662,167 @@ namespace aux {
 			= (flags & open_ssl_socket)
 			? listen_failed_alert::tcp_ssl
 			: listen_failed_alert::tcp;
-		ret.sock.reset(new tcp::acceptor(m_io_service));
-		ret.sock->open(bind_ep.protocol(), ec);
-		last_op = listen_failed_alert::open;
-		if (ec)
+
+		// if we're in force-proxy mode, don't open TCP listen sockets. We cannot
+		// accept connections on our local machine in this case.
+		// TODO: 3 the logic in this if-block should be factored out into a
+		// separate function. At least most of it
+		if (!m_settings.get_bool(settings_pack::force_proxy))
 		{
-#ifndef TORRENT_DISABLE_LOGGING
-			session_log("failed to open socket: %s"
-				, ec.message().c_str());
-#endif
-
-			if (m_alerts.should_post<listen_failed_alert>())
-				m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep, last_op
-					, ec, sock_type);
-			return ret;
-		}
-
-#ifdef TORRENT_WINDOWS
-		{
-			// this is best-effort. ignore errors
-			error_code err;
-			ret.sock->set_option(exclusive_address_use(true), err);
-#ifndef TORRENT_DISABLE_LOGGING
-			if (err)
-			{
-				session_log("failed enable exclusive address use on listen socket: %s"
-					, err.message().c_str());
-			}
-#endif // TORRENT_DISABLE_LOGGING
-		}
-#endif // TORRENT_WINDOWS
-
-		{
-			// this is best-effort. ignore errors
-			error_code err;
-			ret.sock->set_option(tcp::acceptor::reuse_address(true), err);
-#ifndef TORRENT_DISABLE_LOGGING
-			if (err)
-			{
-				session_log("failed enable reuse-address on listen socket: %s"
-					, err.message().c_str());
-			}
-#endif // TORRENT_DISABLE_LOGGING
-		}
-
-#if TORRENT_USE_IPV6
-		if (bind_ep.address().is_v6())
-		{
-			error_code err; // ignore errors here
-			ret.sock->set_option(boost::asio::ip::v6_only(true), err);
-#ifndef TORRENT_DISABLE_LOGGING
-			if (err)
-			{
-				session_log("failed enable v6 only on listen socket: %s"
-					, err.message().c_str());
-			}
-#endif // LOGGING
-
-#ifdef TORRENT_WINDOWS
-			// enable Teredo on windows
-			ret.sock->set_option(v6_protection_level(PROTECTION_LEVEL_UNRESTRICTED), err);
-#ifndef TORRENT_DISABLE_LOGGING
-			if (err)
-			{
-				session_log("failed enable IPv6 unrestricted protection level on "
-					"listen socket: %s", err.message().c_str());
-			}
-#endif // TORRENT_DISABLE_LOGGING
-#endif // TORRENT_WINDOWS
-		}
-#endif // TORRENT_USE_IPV6
-
-		if (!device.empty())
-		{
-			// we have an actual device we're interested in listening on, if we
-			// have SO_BINDTODEVICE functionality, use it now.
-#if TORRENT_HAS_BINDTODEVICE
-			ret.sock->set_option(bind_to_device(device.c_str()), ec);
+			ret.sock.reset(new tcp::acceptor(m_io_service));
+			ret.sock->open(bind_ep.protocol(), ec);
+			last_op = listen_failed_alert::open;
 			if (ec)
 			{
 #ifndef TORRENT_DISABLE_LOGGING
-				session_log("bind to device failed (device: %s): %s"
-					, device.c_str(), ec.message().c_str());
+				session_log("failed to open socket: %s"
+					, ec.message().c_str());
+#endif
+
+				if (m_alerts.should_post<listen_failed_alert>())
+					m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep, last_op
+						, ec, sock_type);
+				return ret;
+			}
+
+#ifdef TORRENT_WINDOWS
+			{
+				// this is best-effort. ignore errors
+				error_code err;
+				ret.sock->set_option(exclusive_address_use(true), err);
+#ifndef TORRENT_DISABLE_LOGGING
+				if (err)
+				{
+					session_log("failed enable exclusive address use on listen socket: %s"
+						, err.message().c_str());
+				}
+#endif // TORRENT_DISABLE_LOGGING
+			}
+#endif // TORRENT_WINDOWS
+
+			{
+				// this is best-effort. ignore errors
+				error_code err;
+				ret.sock->set_option(tcp::acceptor::reuse_address(true), err);
+#ifndef TORRENT_DISABLE_LOGGING
+				if (err)
+				{
+					session_log("failed enable reuse-address on listen socket: %s"
+						, err.message().c_str());
+				}
+#endif // TORRENT_DISABLE_LOGGING
+			}
+
+#if TORRENT_USE_IPV6
+			if (bind_ep.address().is_v6())
+			{
+				error_code err; // ignore errors here
+				ret.sock->set_option(boost::asio::ip::v6_only(true), err);
+#ifndef TORRENT_DISABLE_LOGGING
+				if (err)
+				{
+					session_log("failed enable v6 only on listen socket: %s"
+						, err.message().c_str());
+				}
+#endif // LOGGING
+
+#ifdef TORRENT_WINDOWS
+				// enable Teredo on windows
+				ret.sock->set_option(v6_protection_level(PROTECTION_LEVEL_UNRESTRICTED), err);
+#ifndef TORRENT_DISABLE_LOGGING
+				if (err)
+				{
+					session_log("failed enable IPv6 unrestricted protection level on "
+						"listen socket: %s", err.message().c_str());
+				}
+#endif // TORRENT_DISABLE_LOGGING
+#endif // TORRENT_WINDOWS
+			}
+#endif // TORRENT_USE_IPV6
+
+			if (!device.empty())
+			{
+				// we have an actual device we're interested in listening on, if we
+				// have SO_BINDTODEVICE functionality, use it now.
+#if TORRENT_HAS_BINDTODEVICE
+				ret.sock->set_option(bind_to_device(device.c_str()), ec);
+				if (ec)
+				{
+#ifndef TORRENT_DISABLE_LOGGING
+					session_log("bind to device failed (device: %s): %s"
+						, device.c_str(), ec.message().c_str());
 #endif // TORRENT_DISABLE_LOGGING
 
-				last_op = listen_failed_alert::bind_to_device;
+					last_op = listen_failed_alert::bind_to_device;
+					if (m_alerts.should_post<listen_failed_alert>())
+					{
+						m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
+							, last_op, ec, sock_type);
+					}
+					return ret;
+				}
+#endif
+			}
+
+			ret.sock->bind(bind_ep, ec);
+			last_op = listen_failed_alert::bind;
+
+			while (ec == error_code(error::address_in_use) && retries > 0)
+			{
+				TORRENT_ASSERT_VAL(ec, ec);
+#ifndef TORRENT_DISABLE_LOGGING
+				error_code ignore;
+				session_log("failed to bind listen socket to: %s on device: %s :"
+					" [%s] (%d) %s (retries: %d)"
+					, print_endpoint(bind_ep).c_str()
+					, device.c_str()
+					, ec.category().name(), ec.value(), ec.message().c_str()
+					, retries);
+#endif
+				ec.clear();
+				--retries;
+				bind_ep.port(bind_ep.port() + 1);
+				ret.sock->bind(bind_ep, ec);
+			}
+
+			if (ec == error_code(error::address_in_use)
+				&& !(flags & listen_no_system_port))
+			{
+				// instead of giving up, try let the OS pick a port
+				bind_ep.port(0);
+				ec.clear();
+				ret.sock->bind(bind_ep, ec);
+				last_op = listen_failed_alert::bind;
+			}
+
+			if (ec)
+			{
+				// not even that worked, give up
+
+#ifndef TORRENT_DISABLE_LOGGING
+				error_code ignore;
+				session_log("failed to bind listen socket to: %s on device: %s :"
+					" [%s] (%d) %s (giving up)"
+					, print_endpoint(bind_ep).c_str()
+					, device.c_str()
+					, ec.category().name(), ec.value(), ec.message().c_str());
+#endif
+				if (m_alerts.should_post<listen_failed_alert>())
+				{
+					m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
+						, last_op, ec, sock_type);
+				}
+				ret.sock.reset();
+				return ret;
+			}
+			ret.local_endpoint = ret.sock->local_endpoint(ec);
+			last_op = listen_failed_alert::get_socket_name;
+			if (ec)
+			{
+#ifndef TORRENT_DISABLE_LOGGING
+				session_log("get_sockname failed on listen socket: %s"
+					, ec.message().c_str());
+#endif
 				if (m_alerts.should_post<listen_failed_alert>())
 				{
 					m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
@@ -1757,98 +1830,47 @@ namespace aux {
 				}
 				return ret;
 			}
-#endif
-		}
+			ret.tcp_external_port = ret.local_endpoint.port();
+			TORRENT_ASSERT(ret.tcp_external_port == bind_ep.port()
+				|| bind_ep.port() == 0);
 
-		ret.sock->bind(bind_ep, ec);
-		last_op = listen_failed_alert::bind;
+			ret.sock->listen(m_settings.get_int(settings_pack::listen_queue_size), ec);
+			last_op = listen_failed_alert::listen;
 
-		while (ec == error_code(error::address_in_use) && retries > 0)
-		{
-			TORRENT_ASSERT_VAL(ec, ec);
-#ifndef TORRENT_DISABLE_LOGGING
-			error_code ignore;
-			session_log("failed to bind listen socket to: %s on device: %s :"
-				" [%s] (%d) %s (retries: %d)"
-				, print_endpoint(bind_ep).c_str()
-				, device.c_str()
-				, ec.category().name(), ec.value(), ec.message().c_str()
-				, retries);
-#endif
-			ec.clear();
-			--retries;
-			bind_ep.port(bind_ep.port() + 1);
-			ret.sock->bind(bind_ep, ec);
-		}
-
-		if (ec == error_code(error::address_in_use)
-			&& !(flags & listen_no_system_port))
-		{
-			// instead of giving up, try let the OS pick a port
-			bind_ep.port(0);
-			ec.clear();
-			ret.sock->bind(bind_ep, ec);
-			last_op = listen_failed_alert::bind;
-		}
-
-		if (ec)
-		{
-			// not even that worked, give up
-
-#ifndef TORRENT_DISABLE_LOGGING
-			error_code ignore;
-			session_log("failed to bind listen socket to: %s on device: %s :"
-				" [%s] (%d) %s (giving up)"
-				, print_endpoint(bind_ep).c_str()
-				, device.c_str()
-				, ec.category().name(), ec.value(), ec.message().c_str());
-#endif
-			if (m_alerts.should_post<listen_failed_alert>())
+			if (ec)
 			{
-				m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
-					, last_op, ec, sock_type);
-			}
-			ret.sock.reset();
-			return ret;
-		}
-		ret.local_endpoint = ret.sock->local_endpoint(ec);
-		last_op = listen_failed_alert::get_socket_name;
-		if (ec)
-		{
 #ifndef TORRENT_DISABLE_LOGGING
-			session_log("get_sockname failed on listen socket: %s"
-				, ec.message().c_str());
+				session_log("cannot listen on interface \"%s\": %s"
+					, device.c_str(), ec.message().c_str());
 #endif
-			if (m_alerts.should_post<listen_failed_alert>())
-			{
-				m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
-					, last_op, ec, sock_type);
+				if (m_alerts.should_post<listen_failed_alert>())
+				{
+					m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
+						, last_op, ec, sock_type);
+				}
+				return ret;
 			}
-			return ret;
-		}
-		ret.tcp_external_port = ret.local_endpoint.port();
-		TORRENT_ASSERT(ret.tcp_external_port == port || port == 0);
-
-		ret.sock->listen(m_settings.get_int(settings_pack::listen_queue_size), ec);
-		last_op = listen_failed_alert::listen;
-
-		if (ec)
-		{
-#ifndef TORRENT_DISABLE_LOGGING
-			session_log("cannot listen on interface \"%s\": %s"
-				, device.c_str(), ec.message().c_str());
-#endif
-			if (m_alerts.should_post<listen_failed_alert>())
-			{
-				m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
-					, last_op, ec, sock_type);
-			}
-			return ret;
-		}
+		} // force-proxy mode
 
 		ret.udp_sock.reset(new udp_socket(m_io_service));
-		bind_ip = bind_to_device(m_io_service, *ret.udp_sock, ipv4
-			, device.c_str(), port, ec);
+#if TORRENT_HAS_BINDTODEVICE
+		ret.udp_sock->set_option(bind_to_device(device.c_str()), ec);
+		if (ec)
+		{
+#ifndef TORRENT_DISABLE_LOGGING
+			session_log("bind to device failed (device: %s): %s"
+				, device.c_str(), ec.message().c_str());
+#endif // TORRENT_DISABLE_LOGGING
+
+			last_op = listen_failed_alert::bind_to_device;
+			if (m_alerts.should_post<listen_failed_alert>())
+			{
+				m_alerts.emplace_alert<listen_failed_alert>(device, bind_ep
+					, last_op, ec, sock_type);
+			}
+			return ret;
+		}
+#endif
 		last_op = listen_failed_alert::bind;
 		if (ec)
 		{
@@ -1875,12 +1897,14 @@ namespace aux {
 		if (err)
 		{
 			if (m_alerts.should_post<udp_error_alert>())
-				m_alerts.emplace_alert<udp_error_alert>(udp::endpoint(), ec);
+				m_alerts.emplace_alert<udp_error_alert>(ret.udp_sock->local_endpoint(ec), err);
 		}
+
+		ret.udp_sock->set_force_proxy(m_settings.get_bool(settings_pack::force_proxy));
 
 #ifndef TORRENT_DISABLE_LOGGING
 		session_log(" listening on: %s TCP port: %d UDP port: %d"
-			, print_endpoint(tcp::endpoint(bind_ip, port)).c_str()
+			, bind_ep.address().to_string().c_str()
 			, ret.tcp_external_port, ret.udp_external_port);
 #endif
 		return ret;
@@ -2035,7 +2059,7 @@ namespace aux {
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
 			async_accept(i->sock, i->ssl);
-			remap_ports(3, *i);
+			remap_ports(natpmp_and_upnp, *i);
 		}
 
 		open_new_incoming_socks_connection();
@@ -2044,22 +2068,37 @@ namespace aux {
 #endif
 	}
 
-	// TODO: 3 add an enum for the mask parameter here
-	void session_impl::remap_ports(boost::uint32_t mask, listen_socket_t& s)
+	namespace {
+		template <typename MapProtocol>
+		void map_port(MapProtocol& m, int protocol, tcp::endpoint const& ep
+			, int& map_handle)
+		{
+			if (map_handle != -1) m.delete_mapping(map_handle);
+			map_handle = -1;
+
+			// only update this mapping if we actually have a socket listening
+			if (ep.address() != address())
+				map_handle = m.add_mapping(protocol, ep.port(), ep.port());
+		}
+	}
+
+	void session_impl::remap_ports(remap_port_mask_t const mask
+		, listen_socket_t& s)
 	{
-		if ((mask & 1) && m_natpmp)
+		error_code ec;
+		tcp::endpoint const tcp_ep = s.sock ? s.sock->local_endpoint(ec) : tcp::endpoint(); 
+		tcp::endpoint const udp_ep = s.udp_sock ? s.udp_sock->local_endpoint(ec) : tcp::endpoint();
+
+		if ((mask & natpmp) && m_natpmp)
 		{
-			if (s.tcp_port_mapping[0] != -1) m_natpmp->delete_mapping(s.tcp_port_mapping[0]);
-			s.tcp_port_mapping[0] = m_natpmp->add_mapping(natpmp::tcp
-				, s.local_endpoint.port(), s.local_endpoint.port());
+			map_port(*m_natpmp, natpmp::tcp, tcp_ep, s.tcp_port_mapping[0]);
+			map_port(*m_natpmp, natpmp::udp, udp_ep, s.udp_port_mapping[0]);
 		}
-		if ((mask & 2) && m_upnp)
+		if ((mask & upnp) && m_upnp)
 		{
-			if (s.tcp_port_mapping[1] != -1) m_upnp->delete_mapping(s.tcp_port_mapping[1]);
-			s.tcp_port_mapping[1] = m_upnp->add_mapping(upnp::tcp
-				, s.local_endpoint.port(), s.local_endpoint.port());
+			map_port(*m_upnp, upnp::tcp, tcp_ep, s.tcp_port_mapping[1]);
+			map_port(*m_upnp, upnp::udp, udp_ep, s.udp_port_mapping[1]);
 		}
-		// TODO: 4 map udp socket as well
 	}
 
 	void session_impl::open_new_incoming_socks_connection()
@@ -5099,11 +5138,11 @@ namespace aux {
 		// in case we just set a socks proxy, we might have to
 		// open the socks incoming connection
 		if (!m_socks_listen_socket) open_new_incoming_socks_connection();
-		m_udp_socket.set_proxy_settings(proxy());
-
-#ifdef TORRENT_USE_OPENSSL
-		m_ssl_udp_socket.set_proxy_settings(proxy());
-#endif
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			i->udp_sock->set_proxy_settings(proxy());
+		}
 	}
 
 	void session_impl::update_upnp()
@@ -5919,34 +5958,45 @@ namespace aux {
 	}
 #endif
 
+
+	namespace {
+		template <typename Socket>
+		void set_tos(Socket& s, int v, error_code& ec)
+		{
+#if TORRENT_USE_IPV6
+			if (s.local_endpoint(ec).address().is_v6())
+				s.set_option(traffic_class(v), ec);
+			else if (!ec)
+#endif
+				s.set_option(type_of_service(v), ec);
+		}
+	}
+
 	// TODO: 2 this should be factored into the udp socket, so we only have the
 	// code once
 	void session_impl::update_peer_tos()
 	{
-		error_code ec;
-
-		// TODO: 4 this should probably be factored into the udp_socket class
-#if TORRENT_USE_IPV6 && defined IPV6_TCLASS
-		if (m_udp_socket.local_endpoint(ec).address().is_v6())
-			m_udp_socket.set_option(traffic_class(m_settings.get_int(settings_pack::peer_tos)), ec);
-		else
-#endif
-			m_udp_socket.set_option(type_of_service(m_settings.get_int(settings_pack::peer_tos)), ec);
-
-#ifdef TORRENT_USE_OPENSSL
-#if TORRENT_USE_IPV6 && defined IPV6_TCLASS
-		if (m_ssl_udp_socket.local_endpoint(ec).address().is_v6())
-			m_ssl_udp_socket.set_option(traffic_class(m_settings.get_int(settings_pack::peer_tos)), ec);
-		else
-#endif
-			m_ssl_udp_socket.set_option(type_of_service(m_settings.get_int(settings_pack::peer_tos)), ec);
-#endif
+		int const tos = m_settings.get_int(settings_pack::peer_tos);
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			error_code ec;
+			set_tos(i->sock, tos, ec);
 
 #ifndef TORRENT_DISABLE_LOGGING
-		session_log(">>> SET_TOS [ udp_socket tos: %x e: %s ]"
-			, m_settings.get_int(settings_pack::peer_tos)
-			, ec.message().c_str());
+			session_log(">>> SET_TOS [ tcp (%s %d) tos: %x e: %s ]"
+				, i->sock->local_endpoint().address().to_string().c_str()
+				, i->sock->local_endpoint().port(), tos, ec.message().c_str());
 #endif
+			ec.clear();
+			set_tos(i->udp_sock, tos, ec);
+
+#ifndef TORRENT_DISABLE_LOGGING
+			session_log(">>> SET_TOS [ udp (%s %d) tos: %x e: %s ]"
+				, i->udp_sock->local_address().to_string().c_str(), i->udp_sock->local_port()
+				, tos, ec.message().c_str());
+#endif
+		}
 	}
 
 	void session_impl::update_user_agent()
@@ -6126,22 +6176,32 @@ namespace aux {
 
 	void session_impl::update_socket_buffer_size()
 	{
-		error_code ec;
-		set_socket_buffer_size(m_udp_socket, m_settings, ec);
-		if (ec)
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			if (m_alerts.should_post<udp_error_alert>())
-				m_alerts.emplace_alert<udp_error_alert>(udp::endpoint(), ec);
-		}
-
-#ifdef TORRENT_USE_OPENSSL
-		set_socket_buffer_size(m_ssl_udp_socket, m_settings, ec);
-		if (ec)
-		{
-			if (m_alerts.should_post<udp_error_alert>())
-				m_alerts.emplace_alert<udp_error_alert>(udp::endpoint(), ec);
-		}
+			error_code ec;
+			set_socket_buffer_size(*i->udp_sock, m_settings, ec);
+#ifndef TORRENT_DISABLE_LOGGING
+			if (ec)
+			{
+				error_code err;
+				session_log("socket buffer size [ udp %s %d]: (%d) %s"
+				, i->udp_sock->local_endpoint(err).address().to_string(err).c_str()
+				, i->udp_sock->local_port(), ec.value(), ec.message());
+			}
 #endif
+			ec.clear();
+			set_socket_buffer_size(*i->sock, m_settings, ec);
+#ifndef TORRENT_DISABLE_LOGGING
+			if (ec)
+			{
+				error_code err;
+				session_log("socket buffer size [ udp %s %d]: (%d) %s"
+				, i->sock->local_endpoint(err).address().to_string(err).c_str()
+				, i->sock->local_endpoint(err).port(), ec.value(), ec.message());
+			}
+#endif
+		}
 	}
 
 	void session_impl::update_dht_announce_interval()
@@ -6187,10 +6247,16 @@ namespace aux {
 
 	void session_impl::update_force_proxy()
 	{
-		m_udp_socket.set_force_proxy(m_settings.get_bool(settings_pack::force_proxy));
-#ifdef TORRENT_USE_OPENSSL
-		m_ssl_udp_socket.set_force_proxy(m_settings.get_bool(settings_pack::force_proxy));
-#endif
+		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
+			, end(m_listen_sockets.end()); i != end; ++i)
+		{
+			i->udp_sock->set_force_proxy(m_settings.get_bool(settings_pack::force_proxy));
+
+			// close the TCP listen sockets
+			error_code ec;
+			i->sock->close(ec);
+			i->sock.reset();
+		}
 
 		if (!m_settings.get_bool(settings_pack::force_proxy)) return;
 
@@ -6202,12 +6268,6 @@ namespace aux {
 #ifndef TORRENT_DISABLE_DHT
 		stop_dht();
 #endif
-		// close the listen sockets
-		error_code ec;
-		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
-			, end(m_listen_sockets.end()); i != end; ++i)
-			i->sock->close(ec);
-		m_listen_sockets.clear();
 	}
 
 #ifndef TORRENT_NO_DEPRECATE
@@ -6468,35 +6528,8 @@ namespace aux {
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			remap_ports(1, *i);
+			remap_ports(natpmp, *i);
 		}
-
-		// TODO: 4 once UDP sockets are part of m_listen_sockets, this is not
-		// necesarry!
-/*
-		if (m_udp_socket.is_open())
-		{
-			error_code ec;
-			tcp::endpoint ep = m_udp_socket.local_endpoint(ec);
-			if (!ec) {
-				if (m_udp_mapping[0] != -1) m_natpmp->delete_mapping(m_udp_mapping[0]);
-				m_udp_mapping[0] = m_natpmp->add_mapping(natpmp::udp
-					, ep.port(), ep.port());
-			}
-		}
-#ifdef TORRENT_USE_OPENSSL
-		if (m_ssl_udp_socket.is_open())
-		{
-			error_code ec;
-			tcp::endpoint ep = m_ssl_udp_socket.local_endpoint(ec);
-			if (!ec) {
-				if (m_ssl_udp_mapping[0] != -1) m_natpmp->delete_mapping(m_ssl_udp_mapping[0]);
-				m_ssl_udp_mapping[0] = m_natpmp->add_mapping(natpmp::udp
-					, ep.port(), ep.port());
-			}
-		}
-#endif
-*/
 		return m_natpmp.get();
 	}
 
@@ -6521,35 +6554,8 @@ namespace aux {
 		for (std::list<listen_socket_t>::iterator i = m_listen_sockets.begin()
 			, end(m_listen_sockets.end()); i != end; ++i)
 		{
-			remap_ports(2, *i);
+			remap_ports(upnp, *i);
 		}
-
-		// TODO: 4 once the UDP sockets are part of m_listen_sockets this won't be
-		// necessary!
-/*
-		if (m_udp_socket.is_open())
-		{
-			error_code ec;
-			tcp::endpoint ep = m_udp_socket.local_endpoint(ec);
-			if (!ec) {
-				if (m_udp_mapping[1] != -1) m_upnp->delete_mapping(m_udp_mapping[1]);
-				m_udp_mapping[1] = m_upnp->add_mapping(upnp::udp
-					, ep.port(), ep.port());
-			}
-		}
-#ifdef TORRENT_USE_OPENSSL
-		if (m_ssl_udp_socket.is_open())
-		{
-			error_code ec;
-			tcp::endpoint ep = m_ssl_udp_socket.local_endpoint(ec);
-			if (!ec) {
-				if (m_ssl_udp_mapping[1] != -1) m_upnp->delete_mapping(m_ssl_udp_mapping[1]);
-				m_ssl_udp_mapping[1] = m_upnp->add_mapping(upnp::udp
-					, ep.port(), ep.port());
-			}
-		}
-#endif
-*/
 		return m_upnp.get();
 	}
 

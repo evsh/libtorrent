@@ -139,7 +139,9 @@ namespace libtorrent
 		// to the WAN IP address of NAT-PMP or UPnP router
 		address external_address;
 
-		// this is a cached local endpoint for the listen socket
+		// this is a cached local endpoint for the listen TCP socket
+		// TODO: 4 does this still make sense? Perhaps just the address but not
+		// the port?
 		tcp::endpoint local_endpoint;
 
 		// this is typically set to the same as the local
@@ -160,6 +162,9 @@ namespace libtorrent
 		bool ssl;
 
 		// the actual sockets (TCP listen socket and UDP socket)
+		// An entry does not necessarily have a UDP or TCP socket. One of these
+		// pointers may be null!
+		// TODO: 3 make these unique_ptr<>
 		boost::shared_ptr<tcp::acceptor> sock;
 		boost::shared_ptr<udp_socket> udp_sock;
 	};
@@ -522,7 +527,15 @@ namespace libtorrent
 
 #ifndef TORRENT_DISABLE_DHT
 			bool is_dht_running() const { return (m_dht.get() != NULL); }
-			int external_udp_port() const TORRENT_OVERRIDE { return m_external_udp_port; }
+			int external_udp_port() const TORRENT_OVERRIDE
+			{
+				for (std::list<listen_socket_t>::const_iterator i = m_listen_sockets.begin()
+					, end(m_listen_sockets.end()); i != end; ++i)
+				{
+					if (i->udp_sock) return i->udp_external_port;
+				}
+				return -1;
+			}
 #endif
 
 #if TORRENT_USE_I2P
@@ -1042,12 +1055,6 @@ namespace libtorrent
 			bool incoming_packet(error_code const& ec
 				, udp::endpoint const&, char const* buf, int size) TORRENT_OVERRIDE;
 
-			// see m_external_listen_port. This is the same
-			// but for the udp port used by the DHT.
-			// TODO: 4 remove this. We should just use the port from the
-			// m_listen_sockets
-			int m_external_udp_port;
-
 			libtorrent::utp_socket_manager m_utp_socket_manager;
 
 #ifdef TORRENT_USE_OPENSSL
@@ -1064,12 +1071,17 @@ namespace libtorrent
 			boost::shared_ptr<upnp> m_upnp;
 			boost::shared_ptr<lsd> m_lsd;
 
-			// TODO: 3 once the udp socket is in listen_socket_t, these should
-			// move in there too
 			// mask is a bitmask of which protocols to remap on:
 			// 1: NAT-PMP
 			// 2: UPnP
-			void remap_ports(boost::uint32_t mask, listen_socket_t& s);
+			// TODO: 3 perhaps this function should move into listen_socket_t
+			enum remap_port_mask_t
+			{
+				natpmp = 1,
+				upnp = 2,
+				natpmp_and_upnp = 3
+			};
+			void remap_ports(remap_port_mask_t mask, listen_socket_t& s);
 
 			// the timer used to fire the tick
 			deadline_timer m_timer;
